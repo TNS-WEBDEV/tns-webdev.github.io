@@ -283,19 +283,24 @@
       }
     }
 
-    // 4b — Fringe expansion: any non-mask pixel directly adjacent to
-    //       the mask gets absorbed if it's still somewhat close to the
-    //       background color (the anti-alias fringe zone).
+    // 4b — Fringe expansion: absorb boundary pixels that sit on an
+    //       actual edge AND whose colour is close to the background.
+    //       Both conditions must be true to avoid eating into subjects
+    //       whose colour happens to resemble the background (e.g. a
+    //       white product on a white background).
     var fringe = new Uint8Array(total);
-    var FRINGE_TOL_SQ = 110 * 110; // generous — fringe pixels are blends
+    var FRINGE_TOL_SQ = 50 * 50;  // tighter — only genuine fringe blends
+    var FRINGE_EDGE_MIN = 15;     // needs an actual colour transition
     for (var fey = 1; fey < height - 1; fey++) {
       for (var fex = 1; fex < width - 1; fex++) {
         var fi2 = fey * width + fex;
         if (mask[fi2]) continue;
         if (data[fi2 * 4 + 3] < 10) continue;
-        // Is it on the mask boundary?
+        // Must be adjacent to mask (boundary pixel)
         if (!mask[fi2 - 1] && !mask[fi2 + 1] && !mask[fi2 - width] && !mask[fi2 + width]) continue;
-        // Check if colour is between subject and background (fringe)
+        // Must sit on an actual edge — otherwise it's a smooth surface
+        if (edges[fi2] < FRINGE_EDGE_MIN) continue;
+        // Must be close in colour to the background
         var fo = fi2 * 4;
         var fr = data[fo], fg = data[fo + 1], fb = data[fo + 2];
         var isFringe = false;
@@ -331,6 +336,13 @@
     }
     avgBgR /= bgColors.length; avgBgG /= bgColors.length; avgBgB /= bgColors.length;
 
+    // Only decontaminate pixels whose colour is actually close enough
+    // to the background that blending is plausible.  For a dark subject
+    // on a light background (or vice-versa) the edge pixels are already
+    // dominated by the subject colour and decontamination would distort
+    // them (e.g. make a white projector edge turn grey/dark).
+    var DECON_MAX_DIST_SQ = 90 * 90; // only decontaminate if within this distance of bg
+
     for (var dcy = 1; dcy < height - 1; dcy++) {
       for (var dcx = 1; dcx < width - 1; dcx++) {
         var dci = dcy * width + dcx;
@@ -348,9 +360,16 @@
         }
         if (dcRemoved === 0) continue; // interior pixel — skip
 
-        // Estimate foreground fraction: more bg neighbours → more contaminated
-        var fgFrac = 1.0 - (dcRemoved / 8) * 0.7; // keep at least 0.3
-        if (fgFrac < 0.3) fgFrac = 0.3;
+        // Check distance to background — skip if pixel is far from bg
+        var dcR = data[dco], dcG = data[dco + 1], dcB = data[dco + 2];
+        var dcDr = dcR - avgBgR, dcDg = dcG - avgBgG, dcDb = dcB - avgBgB;
+        var dcDistSq = dcDr * dcDr + dcDg * dcDg + dcDb * dcDb;
+        if (dcDistSq > DECON_MAX_DIST_SQ) continue; // not contaminated
+
+        // Strength proportional to how close the pixel is to the bg
+        var dcStrength = 1.0 - Math.sqrt(dcDistSq) / 90;  // 1 = very close, 0 = far
+        var fgFrac = 1.0 - (dcRemoved / 8) * 0.5 * dcStrength;
+        if (fgFrac < 0.5) fgFrac = 0.5;
 
         // Decontaminate RGB
         var invFg = 1.0 / fgFrac;
@@ -359,7 +378,7 @@
         data[dco + 1] = Math.max(0, Math.min(255, Math.round((data[dco + 1] - bgContrib * avgBgG) * invFg)));
         data[dco + 2] = Math.max(0, Math.min(255, Math.round((data[dco + 2] - bgContrib * avgBgB) * invFg)));
 
-        // Also reduce alpha proportionally
+        // Reduce alpha gently
         data[dco + 3] = Math.max(0, Math.round(data[dco + 3] * fgFrac));
       }
     }
@@ -386,10 +405,10 @@
 
         var fRatio = fremoved / fneighbours;
         var fMul;
-        if (fRatio > 0.65)      fMul = 0.0;  // nearly surrounded → remove
-        else if (fRatio > 0.45) fMul = 0.2;
-        else if (fRatio > 0.3)  fMul = 0.45;
-        else if (fRatio > 0.15) fMul = 0.7;
+        if (fRatio > 0.75)      fMul = 0.1;  // nearly surrounded → mostly remove
+        else if (fRatio > 0.5)  fMul = 0.35;
+        else if (fRatio > 0.3)  fMul = 0.6;
+        else if (fRatio > 0.15) fMul = 0.8;
         else continue;
 
         data[foff + 3] = Math.round(data[foff + 3] * fMul);
