@@ -1,9 +1,168 @@
-<html>
- 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TNS Toolbox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
 <body>
-  <h1>TNS-WEBDEV</h1>
-  <p>This is just a test</p>
-  <img src="https://content.codecademy.com/articles/github-pages-via-web-app/happy-ice-cream.gif" />
+
+  <!-- Top Navigation -->
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="/" class="nav-brand">
+        <div class="nav-brand-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1"/>
+            <rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/>
+            <rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+        </div>
+        TNS Toolbox
+      </a>
+      <div class="nav-shortcut">
+        <kbd>Ctrl</kbd>+<kbd>K</kbd> Quick open
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="app-container">
+
+    <!-- Hero Section -->
+    <section class="hub-hero">
+      <h1>Your Web Toolkit</h1>
+      <p>A collection of fast, free, browser-based tools. No uploads, everything runs locally.</p>
+      <div class="hub-search">
+        <div class="hub-search-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </div>
+        <input type="text" id="toolSearch" placeholder="Search tools..." autocomplete="off">
+      </div>
+    </section>
+
+    <!-- Tools Grid -->
+    <section class="tools-section">
+      <div class="tools-section-header">
+        <h2>All Tools</h2>
+      </div>
+      <div class="tools-grid" id="toolsGrid">
+
+        <!-- Image Converter -->
+        <a href="tools/image-converter/" class="tool-card" data-shortcut="1" data-keywords="image convert png transparent background remove photo picture">
+          <div class="tool-card-icon" style="--card-icon-bg: rgba(99, 102, 241, 0.15); --card-icon-color: #818cf8;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>
+            </svg>
+          </div>
+          <h3>Image Converter</h3>
+          <p>Convert images to transparent PNG. Smart background removal works on any colour, gradient, or textured background.</p>
+          <div class="tool-card-footer">
+            <span class="tool-card-shortcut">1</span>
+            <span class="tool-card-arrow">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+              </svg>
+            </span>
+          </div>
+        </a>
+
+        <!-- Color Picker (Coming Soon) -->
+        <div class="tool-card coming-soon" data-keywords="color picker palette hex rgb">
+          <div class="tool-card-icon" style="--card-icon-bg: rgba(244, 114, 182, 0.15); --card-icon-color: #f472b6;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="10.5" r="2.5"/><circle cx="8.5" cy="7.5" r="2.5"/><circle cx="6.5" cy="12.5" r="2.5"/><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/>
+            </svg>
+          </div>
+          <h3>Color Picker</h3>
+          <p>Pick colors from images, convert between formats, and generate beautiful palettes.</p>
+          <div class="tool-card-footer">
+            <span class="coming-soon-badge">Coming Soon</span>
+          </div>
+        </div>
+
+        <!-- SVG Optimizer (Coming Soon) -->
+        <div class="tool-card coming-soon" data-keywords="svg optimize compress minify vector">
+          <div class="tool-card-icon" style="--card-icon-bg: rgba(34, 197, 94, 0.15); --card-icon-color: #22c55e;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
+            </svg>
+          </div>
+          <h3>SVG Optimizer</h3>
+          <p>Optimize and minify SVG files. Clean up paths and reduce file sizes.</p>
+          <div class="tool-card-footer">
+            <span class="coming-soon-badge">Coming Soon</span>
+          </div>
+        </div>
+
+        <!-- Base64 Encoder (Coming Soon) -->
+        <div class="tool-card coming-soon" data-keywords="base64 encode decode text binary">
+          <div class="tool-card-icon" style="--card-icon-bg: rgba(245, 158, 11, 0.15); --card-icon-color: #f59e0b;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+            </svg>
+          </div>
+          <h3>Base64 Encoder</h3>
+          <p>Encode and decode Base64 strings, files, and images instantly.</p>
+          <div class="tool-card-footer">
+            <span class="coming-soon-badge">Coming Soon</span>
+          </div>
+        </div>
+
+      </div>
+    </section>
+  </main>
+
+  <!-- Keyboard Shortcut Hints -->
+  <div class="shortcut-hint" id="shortcutHint">
+    <span><kbd>1</kbd>-<kbd>9</kbd> Open tool</span>
+    <span><kbd>Ctrl</kbd>+<kbd>K</kbd> Search</span>
+  </div>
+
+  <script>
+    // Search / filter tools
+    const searchInput = document.getElementById('toolSearch');
+    const toolsGrid = document.getElementById('toolsGrid');
+    const cards = toolsGrid.querySelectorAll('.tool-card');
+
+    searchInput.addEventListener('input', (e) => {
+      const query = e.target.value.toLowerCase().trim();
+      cards.forEach(card => {
+        const keywords = (card.dataset.keywords || '') + ' ' + card.textContent.toLowerCase();
+        card.style.display = keywords.includes(query) ? '' : 'none';
+      });
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      // Ctrl+K -> focus search
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        searchInput.focus();
+        searchInput.select();
+        return;
+      }
+
+      // Don't trigger shortcuts when typing in input
+      if (e.target.tagName === 'INPUT') return;
+
+      // Number keys -> open tool
+      const num = parseInt(e.key);
+      if (num >= 1 && num <= 9) {
+        const card = toolsGrid.querySelector(`.tool-card[data-shortcut="${num}"]`);
+        if (card && card.href) {
+          window.location.href = card.href;
+        }
+      }
+    });
+  </script>
+
 </body>
- 
 </html>

@@ -1,1 +1,4 @@
-theme: jekyll-theme-minimal
+include:
+  - "css"
+  - "js"
+  - "tools"

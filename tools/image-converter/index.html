@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Image Converter - TNS Toolbox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../css/style.css">
+</head>
+<body>
+
+  <!-- Top Navigation -->
+  <nav class="top-nav">
+    <div class="top-nav-inner">
+      <a href="/" class="nav-brand">
+        <div class="nav-brand-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1"/>
+            <rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/>
+            <rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+        </div>
+        TNS Toolbox
+      </a>
+      <div class="nav-breadcrumb">
+        <a href="/">Hub</a>
+        <span class="separator">/</span>
+        <span class="current">Image Converter</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="app-container">
+    <div class="tool-page">
+
+      <!-- Tool Header -->
+      <div class="tool-header">
+        <h1>Image Converter</h1>
+        <p>Convert any image to transparent PNG. Smart background removal detects the subject and removes any background colour, gradient, or texture.</p>
+      </div>
+
+      <!-- Drop Zone -->
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-zone-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <h3>Drop images here</h3>
+        <p>or click to browse your files</p>
+        <button class="drop-zone-btn" id="browseBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          Select Files
+        </button>
+        <input type="file" id="fileInput" multiple accept="image/png,image/jpeg,image/webp,image/avif,image/bmp,image/tiff,image/gif,image/svg+xml">
+        <div class="supported-formats">
+          <span class="format-tag">PNG</span>
+          <span class="format-tag">JPG</span>
+          <span class="format-tag">JPEG</span>
+          <span class="format-tag">WebP</span>
+          <span class="format-tag">AVIF</span>
+          <span class="format-tag">GIF</span>
+          <span class="format-tag">BMP</span>
+          <span class="format-tag">TIFF</span>
+          <span class="format-tag">SVG</span>
+        </div>
+      </div>
+
+      <!-- File List (hidden until files are added) -->
+      <div class="file-list-section" id="fileListSection" style="display: none;">
+        <div class="file-list-header">
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <h2>Files</h2>
+            <span class="file-count" id="fileCount">0 files</span>
+          </div>
+          <div class="bg-mode-global" id="bgModeGlobal" style="display:none;">
+            <span class="bg-mode-label">Default:</span>
+            <div class="segmented-toggle" id="globalModeToggle">
+              <button class="seg-btn active" data-mode="quick">Quick</button>
+              <button class="seg-btn" data-mode="ai">AI</button>
+            </div>
+          </div>
+          <div class="file-list-actions">
+            <button class="btn btn-secondary" id="addMoreBtn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              Add More
+            </button>
+            <button class="btn btn-danger" id="clearAllBtn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+              Clear All
+            </button>
+          </div>
+        </div>
+        <div class="ai-model-status" id="aiModelStatus" style="display:none;">
+          <div class="ai-model-status-text">
+            <span id="aiStatusLabel">Downloading AI model...</span>
+            <span id="aiStatusPct">0%</span>
+          </div>
+          <div class="ai-model-progress">
+            <div class="ai-model-progress-fill" id="aiProgressFill" style="width:0%"></div>
+          </div>
+        </div>
+        <div class="file-list" id="fileList"></div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Convert Bar (sticky bottom) -->
+  <div class="convert-bar" id="convertBar" style="display: none;">
+    <div class="convert-bar-info">
+      <strong id="convertCount">0</strong> files ready to convert
+    </div>
+    <div style="display: flex; gap: 10px;">
+      <button class="btn btn-primary" id="convertAllBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        Convert &amp; Download All
+      </button>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast" id="toast">
+    <span id="toastIcon"></span>
+    <span id="toastMessage"></span>
+  </div>
+
+  <!-- Hidden canvas for image processing -->
+  <canvas id="processingCanvas" style="display: none;"></canvas>
+
+  <script src="converter.js"></script>
+
+</body>
+</html>
