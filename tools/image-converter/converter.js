@@ -24,6 +24,12 @@
   const toastEl         = document.getElementById('toast');
   const toastIcon       = document.getElementById('toastIcon');
   const toastMsg        = document.getElementById('toastMessage');
+  const bgModeGlobal    = document.getElementById('bgModeGlobal');
+  const globalModeToggle = document.getElementById('globalModeToggle');
+  const aiModelStatusEl = document.getElementById('aiModelStatus');
+  const aiStatusLabel   = document.getElementById('aiStatusLabel');
+  const aiStatusPct     = document.getElementById('aiStatusPct');
+  const aiProgressFill  = document.getElementById('aiProgressFill');
 
   // Hidden input for "Add More" button
   const addMoreInput = document.createElement('input');
@@ -32,8 +38,11 @@
   addMoreInput.accept = fileInput.accept;
 
   // ── State ─────────────────────────────────────────────────────────────
-  let fileEntries = []; // { id, file, removeBg, status, objectUrl, resultUrl, resultBlob }
+  let fileEntries = []; // { id, file, removeBg, bgMode, status, objectUrl, resultUrl, resultBlob }
   let nextId = 0;
+  let defaultBgMode = 'quick'; // 'quick' | 'ai'
+  let segmenter = null;        // lazy-loaded Transformers.js pipeline
+  let modelLoading = false;    // prevent concurrent init
 
   // ── Helpers ───────────────────────────────────────────────────────────
   function formatBytes(bytes) {
@@ -418,6 +427,109 @@
     return imageData;
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // AI BACKGROUND REMOVAL (Transformers.js + RMBG-1.4)
+  // Lazy-loaded on first use. Model is cached in browser after download.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  function showModelProgress(visible) {
+    aiModelStatusEl.style.display = visible ? '' : 'none';
+  }
+
+  function updateModelProgress(pct, label) {
+    aiStatusLabel.textContent = label;
+    aiStatusPct.textContent = pct + '%';
+    aiProgressFill.style.width = pct + '%';
+  }
+
+  async function getSegmenter() {
+    if (segmenter) return segmenter;
+    if (modelLoading) {
+      return new Promise(function (resolve, reject) {
+        var check = setInterval(function () {
+          if (segmenter) { clearInterval(check); resolve(segmenter); }
+          if (!modelLoading) { clearInterval(check); reject(new Error('Model loading failed')); }
+        }, 200);
+      });
+    }
+
+    modelLoading = true;
+    showModelProgress(true);
+    updateModelProgress(0, 'Loading AI model\u2026');
+
+    try {
+      var mod = await import(
+        'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1'
+      );
+      var pipeline = mod.pipeline;
+      var env = mod.env;
+      env.allowLocalModels = false;
+
+      var downloadTracker = {};
+
+      segmenter = await pipeline('background-removal', 'briaai/RMBG-1.4', {
+        progress_callback: function (info) {
+          if (!info || !info.status) return;
+
+          if (info.status === 'progress' && info.file) {
+            downloadTracker[info.file] = {
+              loaded: info.loaded || 0,
+              total: info.total || 1,
+            };
+            var totalLoaded = 0, totalSize = 0;
+            for (var key in downloadTracker) {
+              totalLoaded += downloadTracker[key].loaded;
+              totalSize += downloadTracker[key].total;
+            }
+            var pct = totalSize > 0 ? Math.round((totalLoaded / totalSize) * 100) : 0;
+            updateModelProgress(pct, 'Downloading AI model\u2026');
+          } else if (info.status === 'ready') {
+            updateModelProgress(100, 'AI model ready');
+            setTimeout(function () { showModelProgress(false); }, 1500);
+          }
+        },
+      });
+
+      modelLoading = false;
+      return segmenter;
+    } catch (err) {
+      modelLoading = false;
+      segmenter = null;
+      showModelProgress(false);
+      throw err;
+    }
+  }
+
+  async function aiRemoveBackground(entry, img) {
+    var seg = await getSegmenter();
+    var result = await seg(entry.file);
+    var aiImage = Array.isArray(result) ? result[0] : result;
+
+    // Draw original image at full resolution
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0);
+
+    // Get the AI mask, scaled to match original dimensions
+    var maskCanvas = aiImage.toCanvas();
+    var tempCanvas = document.createElement('canvas');
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    var tempCtx = tempCanvas.getContext('2d');
+    tempCtx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height);
+    var maskData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // Apply the AI-generated alpha mask to the full-res original
+    var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    var src = imageData.data;
+    var mask = maskData.data;
+    for (var i = 3; i < src.length; i += 4) {
+      src[i] = mask[i]; // copy alpha channel from AI mask
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }
+
   // ── Convert a single file entry ──────────────────────────────────────
   async function convertEntry(entry) {
     entry.status = 'processing';
@@ -433,13 +545,18 @@
       canvas.height = img.naturalHeight;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0);
-      URL.revokeObjectURL(url);
 
       if (entry.removeBg) {
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        removeBackground(imageData);
-        ctx.putImageData(imageData, 0, 0);
+        if (entry.bgMode === 'ai') {
+          await aiRemoveBackground(entry, img);
+        } else {
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          removeBackground(imageData);
+          ctx.putImageData(imageData, 0, 0);
+        }
       }
+
+      URL.revokeObjectURL(url);
 
       const blob = await new Promise((resolve, reject) => {
         canvas.toBlob(b => {
@@ -521,6 +638,7 @@
         id: nextId++,
         file,
         removeBg: false,
+        bgMode: defaultBgMode,
         status: 'pending',
         objectUrl: URL.createObjectURL(file),
         resultUrl: null,
@@ -562,6 +680,7 @@
     fileListSection.style.display = hasFiles ? '' : 'none';
     convertBar.style.display     = hasFiles ? '' : 'none';
     dropZone.style.display       = hasFiles ? 'none' : '';
+    bgModeGlobal.style.display   = hasFiles ? '' : 'none';
 
     fileCountEl.textContent =
       fileEntries.length + (fileEntries.length === 1 ? ' file' : ' files');
@@ -589,10 +708,15 @@
     fileListEl.innerHTML = fileEntries.map(function (entry) {
       var statusLabel = {
         pending: 'Pending',
-        processing: 'Converting\u2026',
+        processing: (entry.removeBg && entry.bgMode === 'ai') ? 'AI processing\u2026' : 'Converting\u2026',
         done: 'Done',
         error: 'Error',
       }[entry.status];
+
+      var statusClass = entry.status;
+      if (entry.status === 'processing' && entry.removeBg && entry.bgMode === 'ai') {
+        statusClass = 'ai-processing';
+      }
 
       // After conversion, show the processed result (with transparency)
       var thumbSrc = entry.resultUrl || entry.objectUrl;
@@ -610,7 +734,7 @@
             '<div class="file-meta">' +
               '<span>' + formatBytes(entry.file.size) + '</span>' +
               '<span>' + entry.file.type.split('/')[1].toUpperCase() + '</span>' +
-              '<span class="status-badge ' + entry.status + '">' + statusLabel + '</span>' +
+              '<span class="status-badge ' + statusClass + '">' + statusLabel + '</span>' +
             '</div>' +
           '</div>' +
           '<div class="file-options">' +
@@ -621,6 +745,20 @@
               '<span class="checkbox-visual"></span>' +
               '<span class="remove-bg-label">Remove background</span>' +
             '</label>' +
+            (entry.removeBg
+              ? '<div class="file-bg-mode">' +
+                  '<div class="segmented-toggle" data-action="modeToggle" data-id="' + entry.id + '">' +
+                    '<button class="seg-btn' + (entry.bgMode === 'quick' ? ' active' : '') +
+                      '" data-mode="quick"' +
+                      (entry.status === 'processing' ? ' disabled' : '') +
+                      '>Quick</button>' +
+                    '<button class="seg-btn' + (entry.bgMode === 'ai' ? ' active' : '') +
+                      '" data-mode="ai"' +
+                      (entry.status === 'processing' ? ' disabled' : '') +
+                      '>AI</button>' +
+                  '</div>' +
+                '</div>'
+              : '') +
           '</div>' +
           '<div class="file-actions">' +
             (entry.status === 'done'
@@ -646,6 +784,29 @@
 
   // ── Event delegation for file list actions ───────────────────────────
   fileListEl.addEventListener('click', function (e) {
+    // Per-file mode toggle (Quick / AI)
+    var modeBtn = e.target.closest('.seg-btn');
+    if (modeBtn) {
+      var toggleEl = modeBtn.closest('[data-action="modeToggle"]');
+      if (toggleEl) {
+        var modeId = parseInt(toggleEl.dataset.id, 10);
+        var modeEntry = fileEntries.find(function (item) { return item.id === modeId; });
+        if (modeEntry && modeEntry.status !== 'processing') {
+          modeEntry.bgMode = modeBtn.dataset.mode;
+          if (modeEntry.status === 'done') {
+            modeEntry.status = 'pending';
+            modeEntry.resultBlob = null;
+            if (modeEntry.resultUrl) {
+              URL.revokeObjectURL(modeEntry.resultUrl);
+              modeEntry.resultUrl = null;
+            }
+          }
+          renderList();
+        }
+        return;
+      }
+    }
+
     var btn = e.target.closest('[data-action]');
     if (!btn) return;
     var id = parseInt(btn.dataset.id, 10);
@@ -667,6 +828,11 @@
 
     entry.removeBg = e.target.checked;
 
+    // When enabling, apply the current global default mode
+    if (entry.removeBg) {
+      entry.bgMode = defaultBgMode;
+    }
+
     // If already converted, reset so it can be re-converted with the new setting
     if (entry.status === 'done') {
       entry.status = 'pending';
@@ -675,8 +841,18 @@
         URL.revokeObjectURL(entry.resultUrl);
         entry.resultUrl = null;
       }
-      renderList();
     }
+    renderList();
+  });
+
+  // ── Global mode toggle (Quick / AI default) ─────────────────────────
+  globalModeToggle.addEventListener('click', function (e) {
+    var btn = e.target.closest('.seg-btn');
+    if (!btn) return;
+    defaultBgMode = btn.dataset.mode;
+    globalModeToggle.querySelectorAll('.seg-btn').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.mode === defaultBgMode);
+    });
   });
 
   // ── Drop zone events ─────────────────────────────────────────────────

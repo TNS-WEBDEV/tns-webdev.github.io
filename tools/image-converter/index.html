@@ -83,6 +83,13 @@
             <h2>Files</h2>
             <span class="file-count" id="fileCount">0 files</span>
           </div>
+          <div class="bg-mode-global" id="bgModeGlobal" style="display:none;">
+            <span class="bg-mode-label">Default:</span>
+            <div class="segmented-toggle" id="globalModeToggle">
+              <button class="seg-btn active" data-mode="quick">Quick</button>
+              <button class="seg-btn" data-mode="ai">AI</button>
+            </div>
+          </div>
           <div class="file-list-actions">
             <button class="btn btn-secondary" id="addMoreBtn">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -96,6 +103,15 @@
               </svg>
               Clear All
             </button>
+          </div>
+        </div>
+        <div class="ai-model-status" id="aiModelStatus" style="display:none;">
+          <div class="ai-model-status-text">
+            <span id="aiStatusLabel">Downloading AI model...</span>
+            <span id="aiStatusPct">0%</span>
+          </div>
+          <div class="ai-model-progress">
+            <div class="ai-model-progress-fill" id="aiProgressFill" style="width:0%"></div>
           </div>
         </div>
         <div class="file-list" id="fileList"></div>
@@ -130,7 +146,7 @@
   <!-- Hidden canvas for image processing -->
   <canvas id="processingCanvas" style="display: none;"></canvas>
 
-  <script src="converter.js"></script>
+  <script type="module" src="converter.js"></script>
 
 </body>
 </html>
