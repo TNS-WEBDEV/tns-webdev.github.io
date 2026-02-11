@@ -257,11 +257,13 @@
       if (cy < height - 1)   tryExpand(cur, cur + width);
     }
 
-    // ── 4. Morphological close (dilate then erode the mask) ───────────
-    //    Fills small 1-2px holes inside the removed background so stray
-    //    opaque specks don't survive.
+    // ── 4. Mask cleanup ────────────────────────────────────────────────
+    //    a) Morphological close: fills tiny 1-2px holes in the mask
+    //    b) Fringe expansion: grow the mask by 1px to eat the anti-alias
+    //       halo that the original image baked against its background
     var mask = visited; // 1 = background (removed)
-    // Dilate: if ≥3 of 4 neighbours are background, mark as background
+
+    // 4a — Close: dilate then erode to fill small holes
     var dilated = new Uint8Array(total);
     for (var dy = 1; dy < height - 1; dy++) {
       for (var dx = 1; dx < width - 1; dx++) {
@@ -271,53 +273,126 @@
         if (nb >= 3) dilated[di] = 1;
       }
     }
-    // Erode: only keep dilated pixels if ≥3 neighbours are also dilated
     for (var ery = 1; ery < height - 1; ery++) {
       for (var erx = 1; erx < width - 1; erx++) {
         var ei = ery * width + erx;
         if (!dilated[ei]) continue;
-        if (mask[ei]) continue; // was already bg — keep it
+        if (mask[ei]) continue;
         var enb = dilated[ei - 1] + dilated[ei + 1] + dilated[ei - width] + dilated[ei + width];
-        if (enb >= 3) {
-          // This was a tiny hole — fill it
-          data[ei * 4 + 3] = 0;
-          mask[ei] = 1;
-        }
+        if (enb >= 3) { data[ei * 4 + 3] = 0; mask[ei] = 1; }
       }
     }
 
-    // ── 5. Alpha feathering at mask boundary ──────────────────────────
-    //    Two-pass: count removed neighbours in a 3×3 window, then blend.
-    //    This gives a smooth, anti-aliased cutout edge.
-    var alphaAdj = new Float32Array(total); // multiplier, 0 = no change
+    // 4b — Fringe expansion: any non-mask pixel directly adjacent to
+    //       the mask gets absorbed if it's still somewhat close to the
+    //       background color (the anti-alias fringe zone).
+    var fringe = new Uint8Array(total);
+    var FRINGE_TOL_SQ = 110 * 110; // generous — fringe pixels are blends
+    for (var fey = 1; fey < height - 1; fey++) {
+      for (var fex = 1; fex < width - 1; fex++) {
+        var fi2 = fey * width + fex;
+        if (mask[fi2]) continue;
+        if (data[fi2 * 4 + 3] < 10) continue;
+        // Is it on the mask boundary?
+        if (!mask[fi2 - 1] && !mask[fi2 + 1] && !mask[fi2 - width] && !mask[fi2 + width]) continue;
+        // Check if colour is between subject and background (fringe)
+        var fo = fi2 * 4;
+        var fr = data[fo], fg = data[fo + 1], fb = data[fo + 2];
+        var isFringe = false;
+        for (var fk = 0; fk < bgColors.length; fk++) {
+          var fdr = fr - bgColors[fk].r;
+          var fdg = fg - bgColors[fk].g;
+          var fdb = fb - bgColors[fk].b;
+          if (fdr * fdr + fdg * fdg + fdb * fdb < FRINGE_TOL_SQ) { isFringe = true; break; }
+        }
+        if (isFringe) fringe[fi2] = 1;
+      }
+    }
+    // Apply fringe removal
+    for (var fri = 0; fri < total; fri++) {
+      if (fringe[fri]) { data[fri * 4 + 3] = 0; mask[fri] = 1; }
+    }
+
+    // ── 5. Color decontamination ────────────────────────────────────
+    //    Edge pixels in the original image were anti-aliased against the
+    //    background, so their RGB is a blend of subject + bg colour.
+    //    We estimate the bg contribution and subtract it so the cutout
+    //    looks clean against any new background.
+    //
+    //    Formula: assuming original pixel = α·fg + (1−α)·bg
+    //    where α is the "true" foreground fraction estimated from
+    //    neighbourhood context. We solve for fg:
+    //       fg = (pixel − (1−α)·bg) / α   [clamped to 0–255]
+
+    // Compute the overall average background colour for decontamination
+    var avgBgR = 0, avgBgG = 0, avgBgB = 0;
+    for (var bci = 0; bci < bgColors.length; bci++) {
+      avgBgR += bgColors[bci].r; avgBgG += bgColors[bci].g; avgBgB += bgColors[bci].b;
+    }
+    avgBgR /= bgColors.length; avgBgG /= bgColors.length; avgBgB /= bgColors.length;
+
+    for (var dcy = 1; dcy < height - 1; dcy++) {
+      for (var dcx = 1; dcx < width - 1; dcx++) {
+        var dci = dcy * width + dcx;
+        if (mask[dci]) continue;
+        var dco = dci * 4;
+        if (data[dco + 3] < 10) continue;
+
+        // Count removed neighbours in 3×3 to detect boundary pixels
+        var dcRemoved = 0;
+        for (var dky = -1; dky <= 1; dky++) {
+          for (var dkx = -1; dkx <= 1; dkx++) {
+            if (dkx === 0 && dky === 0) continue;
+            if (mask[(dcy + dky) * width + (dcx + dkx)]) dcRemoved++;
+          }
+        }
+        if (dcRemoved === 0) continue; // interior pixel — skip
+
+        // Estimate foreground fraction: more bg neighbours → more contaminated
+        var fgFrac = 1.0 - (dcRemoved / 8) * 0.7; // keep at least 0.3
+        if (fgFrac < 0.3) fgFrac = 0.3;
+
+        // Decontaminate RGB
+        var invFg = 1.0 / fgFrac;
+        var bgContrib = 1.0 - fgFrac;
+        data[dco]     = Math.max(0, Math.min(255, Math.round((data[dco]     - bgContrib * avgBgR) * invFg)));
+        data[dco + 1] = Math.max(0, Math.min(255, Math.round((data[dco + 1] - bgContrib * avgBgG) * invFg)));
+        data[dco + 2] = Math.max(0, Math.min(255, Math.round((data[dco + 2] - bgContrib * avgBgB) * invFg)));
+
+        // Also reduce alpha proportionally
+        data[dco + 3] = Math.max(0, Math.round(data[dco + 3] * fgFrac));
+      }
+    }
+
+    // ── 6. Smooth alpha feathering ──────────────────────────────────
+    //    Final pass: gentle alpha fade on any remaining boundary pixels
+    //    using a 5×5 neighbourhood ratio.
     for (var fy = 2; fy < height - 2; fy++) {
       for (var fx = 2; fx < width - 2; fx++) {
         var fi = fy * width + fx;
-        if (mask[fi]) continue;                // already removed
-        if (data[fi * 4 + 3] < 10) continue;   // already transparent
+        if (mask[fi]) continue;
+        var foff = fi * 4;
+        if (data[foff + 3] < 5) continue;
 
-        // Count removed pixels in a 5×5 neighbourhood
-        var removed = 0, neighbours = 0;
-        for (var ky = -2; ky <= 2; ky++) {
-          for (var kx = -2; kx <= 2; kx++) {
-            if (kx === 0 && ky === 0) continue;
-            neighbours++;
-            if (mask[(fy + ky) * width + (fx + kx)]) removed++;
+        var fremoved = 0, fneighbours = 0;
+        for (var fky = -2; fky <= 2; fky++) {
+          for (var fkx = -2; fkx <= 2; fkx++) {
+            if (fkx === 0 && fky === 0) continue;
+            fneighbours++;
+            if (mask[(fy + fky) * width + (fx + fkx)]) fremoved++;
           }
         }
-        if (removed === 0) continue;
-        // More removed neighbours → lower alpha (smoother fade)
-        var ratio = removed / neighbours;   // 0..1
-        if (ratio > 0.7)      alphaAdj[fi] = 0.15;
-        else if (ratio > 0.5) alphaAdj[fi] = 0.35;
-        else if (ratio > 0.3) alphaAdj[fi] = 0.55;
-        else if (ratio > 0.1) alphaAdj[fi] = 0.75;
-      }
-    }
-    // Apply alpha adjustments
-    for (var ai = 0; ai < total; ai++) {
-      if (alphaAdj[ai] > 0) {
-        data[ai * 4 + 3] = Math.round(data[ai * 4 + 3] * alphaAdj[ai]);
+        if (fremoved === 0) continue;
+
+        var fRatio = fremoved / fneighbours;
+        var fMul;
+        if (fRatio > 0.65)      fMul = 0.0;  // nearly surrounded → remove
+        else if (fRatio > 0.45) fMul = 0.2;
+        else if (fRatio > 0.3)  fMul = 0.45;
+        else if (fRatio > 0.15) fMul = 0.7;
+        else continue;
+
+        data[foff + 3] = Math.round(data[foff + 3] * fMul);
       }
     }
 
