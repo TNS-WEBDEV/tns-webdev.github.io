@@ -71,132 +71,253 @@
     });
   }
 
-  // ── Background removal (flood-fill from edges) ───────────────────────
-  // Makes white-ish / light pixels transparent starting from image edges.
-  // Uses a tolerance-based BFS flood fill so it only removes contiguous
-  // background, leaving the subject intact.
+  // ═══════════════════════════════════════════════════════════════════════
+  // SMART BACKGROUND REMOVAL
+  //
+  // Pipeline:
+  //   1. Sample background colours from the 4 image edges
+  //   2. Compute luminance → Gaussian blur → Sobel edge map
+  //   3. Edge-aware BFS from borders:
+  //        • background-colour match  → can cross weak/moderate edges
+  //        • local-similarity match   → can only cross very weak edges
+  //        • strong edge              → always blocks
+  //   4. Morphological close to fill tiny mask holes
+  //   5. Multi-radius alpha feathering at mask boundary
+  //
+  // This handles solid, gradient and textured backgrounds of any colour
+  // without eating into the subject.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ── Helper: average colour in a rectangular region ───────────────────
+  function averageColorInRect(data, stride, x0, y0, x1, y1) {
+    var r = 0, g = 0, b = 0, n = 0;
+    for (var y = y0; y < y1; y++) {
+      for (var x = x0; x < x1; x++) {
+        var o = (y * stride + x) * 4;
+        if (data[o + 3] < 10) continue;
+        r += data[o]; g += data[o + 1]; b += data[o + 2]; n++;
+      }
+    }
+    if (n === 0) return null;
+    return { r: r / n, g: g / n, b: b / n };
+  }
+
+  // ── Main entry point ────────────────────────────────────────────────
   function removeBackground(imageData) {
-    const { data, width, height } = imageData;
-    const total = width * height;
+    var data   = imageData.data;
+    var width  = imageData.width;
+    var height = imageData.height;
+    var total  = width * height;
 
-    // Pre-allocated typed-array queue (max size = total pixels)
-    const queue = new Int32Array(total);
-    let qHead = 0;
-    let qTail = 0;
+    // ── 1. Sample background colours from the four edges ──────────────
+    var BORDER = Math.max(3, Math.min(10,
+                   Math.floor(Math.min(width, height) * 0.02)));
 
-    // Visited map
-    const visited = new Uint8Array(total);
+    var bgColors = [
+      averageColorInRect(data, width, 0, 0, width, BORDER),              // top
+      averageColorInRect(data, width, 0, height - BORDER, width, height), // bottom
+      averageColorInRect(data, width, 0, 0, BORDER, height),              // left
+      averageColorInRect(data, width, width - BORDER, 0, width, height),  // right
+    ].filter(Boolean); // drop null (fully-transparent edges)
 
-    // Tolerance: Euclidean distance from pure white (255,255,255).
-    // 55 covers JPEG compression artifacts and light shadows.
-    const TOLERANCE = 55;
+    // Also add the four corner averages for better gradient coverage
+    var CS = Math.max(BORDER, Math.floor(Math.min(width, height) * 0.05));
+    var corners = [
+      averageColorInRect(data, width, 0, 0, CS, CS),
+      averageColorInRect(data, width, width - CS, 0, width, CS),
+      averageColorInRect(data, width, 0, height - CS, CS, height),
+      averageColorInRect(data, width, width - CS, height - CS, width, height),
+    ].filter(Boolean);
+    for (var ci = 0; ci < corners.length; ci++) bgColors.push(corners[ci]);
 
-    function pixelIndex(x, y) {
-      return y * width + x;
+    if (bgColors.length === 0) return imageData; // nothing to do
+
+    // ── 2. Edge map: luminance → blur → Sobel ─────────────────────────
+    var lum = new Float32Array(total);
+    for (var i = 0; i < total; i++) {
+      var o4 = i * 4;
+      lum[i] = 0.299 * data[o4] + 0.587 * data[o4 + 1] + 0.114 * data[o4 + 2];
     }
 
-    function isBackgroundPixel(i) {
-      const off = i * 4;
-      const r = data[off];
-      const g = data[off + 1];
-      const b = data[off + 2];
-      const a = data[off + 3];
-      // Already transparent → not background (nothing to remove)
-      if (a < 10) return false;
-      // Euclidean distance from white
-      const dr = 255 - r;
-      const dg = 255 - g;
-      const db = 255 - b;
-      return (dr * dr + dg * dg + db * db) < (TOLERANCE * TOLERANCE);
+    // 3×3 Gaussian blur (reduces noise + texture so Sobel sees real edges)
+    var blurred = new Float32Array(total);
+    for (var by = 1; by < height - 1; by++) {
+      for (var bx = 1; bx < width - 1; bx++) {
+        var bi = by * width + bx;
+        blurred[bi] = (
+          lum[bi - width - 1]     + 2 * lum[bi - width] + lum[bi - width + 1] +
+          2 * lum[bi - 1]         + 4 * lum[bi]          + 2 * lum[bi + 1] +
+          lum[bi + width - 1]     + 2 * lum[bi + width]  + lum[bi + width + 1]
+        ) / 16;
+      }
+    }
+    // Copy unblurred border rows/columns
+    for (var ex = 0; ex < width; ex++) {
+      blurred[ex] = lum[ex];
+      blurred[(height - 1) * width + ex] = lum[(height - 1) * width + ex];
+    }
+    for (var ey = 0; ey < height; ey++) {
+      blurred[ey * width] = lum[ey * width];
+      blurred[ey * width + width - 1] = lum[ey * width + width - 1];
     }
 
-    // Seed the queue with all edge pixels that look like background
-    for (let x = 0; x < width; x++) {
-      const top = pixelIndex(x, 0);
-      if (isBackgroundPixel(top) && !visited[top]) {
-        visited[top] = 1;
-        queue[qTail++] = top;
-      }
-      const bot = pixelIndex(x, height - 1);
-      if (isBackgroundPixel(bot) && !visited[bot]) {
-        visited[bot] = 1;
-        queue[qTail++] = bot;
+    // Sobel gradient magnitude  (reuse `lum` array to store edges)
+    var edges = lum; // alias — lum is no longer needed
+    for (var si = 0; si < total; si++) edges[si] = 0; // clear
+    for (var sy = 1; sy < height - 1; sy++) {
+      for (var sx = 1; sx < width - 1; sx++) {
+        var idx = sy * width + sx;
+        var tl = blurred[idx - width - 1], tc = blurred[idx - width], tr = blurred[idx - width + 1];
+        var ml = blurred[idx - 1],                                     mr = blurred[idx + 1];
+        var bl = blurred[idx + width - 1], bc = blurred[idx + width], br = blurred[idx + width + 1];
+        var gx = -tl + tr - 2 * ml + 2 * mr - bl + br;
+        var gy = -tl - 2 * tc - tr  + bl + 2 * bc + br;
+        edges[idx] = Math.sqrt(gx * gx + gy * gy);
       }
     }
-    for (let y = 1; y < height - 1; y++) {
-      const left = pixelIndex(0, y);
-      if (isBackgroundPixel(left) && !visited[left]) {
-        visited[left] = 1;
-        queue[qTail++] = left;
+    blurred = null; // allow GC
+
+    // ── 3. Edge-aware BFS from image borders ──────────────────────────
+    var visited = new Uint8Array(total); // 0=unvisited, 1=background
+    var queue   = new Int32Array(total);
+    var qHead   = 0, qTail = 0;
+
+    // Thresholds (squared where applicable for speed)
+    var BG_TOL_SQ    = 70 * 70;   // match any sampled background colour
+    var LOCAL_TOL_SQ = 35 * 35;   // match immediate neighbour
+    var EDGE_HARD    = 80;        // never cross
+    var EDGE_SOFT    = 25;        // local-similarity only below this
+
+    // -- Does pixel i match any background colour? --
+    function matchesBg(pi) {
+      var po = pi * 4;
+      var pr = data[po], pg = data[po + 1], pb = data[po + 2];
+      for (var k = 0; k < bgColors.length; k++) {
+        var dr = pr - bgColors[k].r;
+        var dg = pg - bgColors[k].g;
+        var db = pb - bgColors[k].b;
+        if (dr * dr + dg * dg + db * db < BG_TOL_SQ) return true;
       }
-      const right = pixelIndex(width - 1, y);
-      if (isBackgroundPixel(right) && !visited[right]) {
-        visited[right] = 1;
-        queue[qTail++] = right;
+      return false;
+    }
+
+    // -- Are two pixels locally similar? --
+    function localSimilar(a, b) {
+      var oa = a * 4, ob = b * 4;
+      var dr = data[oa] - data[ob];
+      var dg = data[oa + 1] - data[ob + 1];
+      var db = data[oa + 2] - data[ob + 2];
+      return (dr * dr + dg * dg + db * db) < LOCAL_TOL_SQ;
+    }
+
+    // -- Attempt to expand from pixel `from` into pixel `ni` --
+    function tryExpand(from, ni) {
+      if (visited[ni]) return;
+      if (data[ni * 4 + 3] < 10) { visited[ni] = 1; return; } // already transparent
+
+      var e = edges[ni];
+      if (e >= EDGE_HARD) return;                      // hard edge — never cross
+
+      if (matchesBg(ni)) {                             // bg-colour match → cross moderate edges
+        visited[ni] = 1;
+        queue[qTail++] = ni;
+      } else if (e < EDGE_SOFT && localSimilar(from, ni)) { // gradient follow → weak edges only
+        visited[ni] = 1;
+        queue[qTail++] = ni;
       }
     }
 
-    // BFS: expand from edge background pixels inward
+    // Seed: border pixels that look like background
+    for (var tx = 0; tx < width; tx++) {
+      var t = tx;
+      if (data[t * 4 + 3] >= 10 && matchesBg(t)) { visited[t] = 1; queue[qTail++] = t; }
+      t = (height - 1) * width + tx;
+      if (!visited[t] && data[t * 4 + 3] >= 10 && matchesBg(t)) { visited[t] = 1; queue[qTail++] = t; }
+    }
+    for (var ty = 1; ty < height - 1; ty++) {
+      var tl2 = ty * width;
+      if (!visited[tl2] && data[tl2 * 4 + 3] >= 10 && matchesBg(tl2)) { visited[tl2] = 1; queue[qTail++] = tl2; }
+      var tr2 = ty * width + width - 1;
+      if (!visited[tr2] && data[tr2 * 4 + 3] >= 10 && matchesBg(tr2)) { visited[tr2] = 1; queue[qTail++] = tr2; }
+    }
+
+    // Run BFS
     while (qHead < qTail) {
-      const i = queue[qHead++];
-      const x = i % width;
-      const y = (i - x) / width;
+      var cur = queue[qHead++];
+      var cx  = cur % width;
+      var cy  = (cur - cx) / width;
 
-      // Make this pixel fully transparent
-      data[i * 4 + 3] = 0;
+      // Make background pixel transparent
+      data[cur * 4 + 3] = 0;
 
-      // Check 4-connected neighbors
-      if (x > 0) {
-        const ni = i - 1;
-        if (!visited[ni] && isBackgroundPixel(ni)) {
-          visited[ni] = 1;
-          queue[qTail++] = ni;
-        }
+      // Expand into 4-connected neighbours
+      if (cx > 0)            tryExpand(cur, cur - 1);
+      if (cx < width - 1)    tryExpand(cur, cur + 1);
+      if (cy > 0)            tryExpand(cur, cur - width);
+      if (cy < height - 1)   tryExpand(cur, cur + width);
+    }
+
+    // ── 4. Morphological close (dilate then erode the mask) ───────────
+    //    Fills small 1-2px holes inside the removed background so stray
+    //    opaque specks don't survive.
+    var mask = visited; // 1 = background (removed)
+    // Dilate: if ≥3 of 4 neighbours are background, mark as background
+    var dilated = new Uint8Array(total);
+    for (var dy = 1; dy < height - 1; dy++) {
+      for (var dx = 1; dx < width - 1; dx++) {
+        var di = dy * width + dx;
+        if (mask[di]) { dilated[di] = 1; continue; }
+        var nb = mask[di - 1] + mask[di + 1] + mask[di - width] + mask[di + width];
+        if (nb >= 3) dilated[di] = 1;
       }
-      if (x < width - 1) {
-        const ni = i + 1;
-        if (!visited[ni] && isBackgroundPixel(ni)) {
-          visited[ni] = 1;
-          queue[qTail++] = ni;
-        }
-      }
-      if (y > 0) {
-        const ni = i - width;
-        if (!visited[ni] && isBackgroundPixel(ni)) {
-          visited[ni] = 1;
-          queue[qTail++] = ni;
-        }
-      }
-      if (y < height - 1) {
-        const ni = i + width;
-        if (!visited[ni] && isBackgroundPixel(ni)) {
-          visited[ni] = 1;
-          queue[qTail++] = ni;
+    }
+    // Erode: only keep dilated pixels if ≥3 neighbours are also dilated
+    for (var ery = 1; ery < height - 1; ery++) {
+      for (var erx = 1; erx < width - 1; erx++) {
+        var ei = ery * width + erx;
+        if (!dilated[ei]) continue;
+        if (mask[ei]) continue; // was already bg — keep it
+        var enb = dilated[ei - 1] + dilated[ei + 1] + dilated[ei - width] + dilated[ei + width];
+        if (enb >= 3) {
+          // This was a tiny hole — fill it
+          data[ei * 4 + 3] = 0;
+          mask[ei] = 1;
         }
       }
     }
 
-    // Anti-alias: soften alpha on pixels adjacent to removed ones
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        const i = pixelIndex(x, y);
-        if (visited[i]) continue;
-        const off = i * 4;
-        if (data[off + 3] < 10) continue;
+    // ── 5. Alpha feathering at mask boundary ──────────────────────────
+    //    Two-pass: count removed neighbours in a 3×3 window, then blend.
+    //    This gives a smooth, anti-aliased cutout edge.
+    var alphaAdj = new Float32Array(total); // multiplier, 0 = no change
+    for (var fy = 2; fy < height - 2; fy++) {
+      for (var fx = 2; fx < width - 2; fx++) {
+        var fi = fy * width + fx;
+        if (mask[fi]) continue;                // already removed
+        if (data[fi * 4 + 3] < 10) continue;   // already transparent
 
-        let removedNeighbors = 0;
-        if (visited[i - 1])     removedNeighbors++;
-        if (visited[i + 1])     removedNeighbors++;
-        if (visited[i - width]) removedNeighbors++;
-        if (visited[i + width]) removedNeighbors++;
-
-        if (removedNeighbors >= 3) {
-          data[off + 3] = Math.round(data[off + 3] * 0.3);
-        } else if (removedNeighbors >= 2) {
-          data[off + 3] = Math.round(data[off + 3] * 0.5);
-        } else if (removedNeighbors === 1) {
-          data[off + 3] = Math.round(data[off + 3] * 0.75);
+        // Count removed pixels in a 5×5 neighbourhood
+        var removed = 0, neighbours = 0;
+        for (var ky = -2; ky <= 2; ky++) {
+          for (var kx = -2; kx <= 2; kx++) {
+            if (kx === 0 && ky === 0) continue;
+            neighbours++;
+            if (mask[(fy + ky) * width + (fx + kx)]) removed++;
+          }
         }
+        if (removed === 0) continue;
+        // More removed neighbours → lower alpha (smoother fade)
+        var ratio = removed / neighbours;   // 0..1
+        if (ratio > 0.7)      alphaAdj[fi] = 0.15;
+        else if (ratio > 0.5) alphaAdj[fi] = 0.35;
+        else if (ratio > 0.3) alphaAdj[fi] = 0.55;
+        else if (ratio > 0.1) alphaAdj[fi] = 0.75;
+      }
+    }
+    // Apply alpha adjustments
+    for (var ai = 0; ai < total; ai++) {
+      if (alphaAdj[ai] > 0) {
+        data[ai * 4 + 3] = Math.round(data[ai * 4 + 3] * alphaAdj[ai]);
       }
     }
 
@@ -399,7 +520,7 @@
             '</div>' +
           '</div>' +
           '<div class="file-options">' +
-            '<label class="remove-bg-toggle" title="Remove white/light background">' +
+            '<label class="remove-bg-toggle" title="Detect subject and remove background">' +
               '<input type="checkbox" data-action="toggleBg" data-id="' + entry.id + '"' +
                 (entry.removeBg ? ' checked' : '') +
                 (entry.status === 'processing' ? ' disabled' : '') + '>' +
