@@ -448,7 +448,7 @@
           }],
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 20,
+            maxOutputTokens: 256,
           },
         }),
       }
@@ -460,11 +460,23 @@
     }
 
     var data = await response.json();
+    console.log('[Gemini] Raw response for', entry.file.name, data);
+
     var text = '';
     if (data.candidates && data.candidates[0] && data.candidates[0].content &&
-        data.candidates[0].content.parts && data.candidates[0].content.parts[0]) {
-      text = data.candidates[0].content.parts[0].text.trim().toLowerCase();
+        data.candidates[0].content.parts) {
+      // Gemini 2.5 Flash is a thinking model — response may contain thought
+      // parts (thought: true) alongside the actual answer. We only want the
+      // non-thought text part.
+      var parts = data.candidates[0].content.parts;
+      for (var i = 0; i < parts.length; i++) {
+        if (!parts[i].thought && parts[i].text) {
+          text = parts[i].text.trim().toLowerCase();
+        }
+      }
     }
+
+    console.log('[Gemini] Parsed label for', entry.file.name, '→', JSON.stringify(text));
 
     // Validate the response is one of our valid descriptions
     if (VALID_DESCRIPTIONS.indexOf(text) !== -1) {
@@ -478,6 +490,7 @@
       }
     }
 
+    console.warn('[Gemini] Unrecognised response for', entry.file.name, '→', JSON.stringify(text), '— falling back to detail');
     return 'detail'; // fallback
   }
 
@@ -491,18 +504,22 @@
     // Try Gemini first if API key is available
     if (geminiApiKey) {
       try {
+        console.log('[Gemini] Detecting angle for', entry.file.name);
         if (!fileEntries.find(function (e) { return e.id === entry.id; })) return;
         var result = await detectAngleGemini(entry);
         if (!fileEntries.find(function (e) { return e.id === entry.id; })) return;
         if (entry.descriptionSource === 'user') return;
 
+        console.log('[Gemini] Result for', entry.file.name, '→', result);
         entry.description = result;
         entry.descriptionSource = 'ai';
         renderList();
         return;
       } catch (err) {
-        console.warn('Gemini angle detection failed for', entry.file.name, '— falling back to CLIP:', err);
+        console.warn('[Gemini] Failed for', entry.file.name, '— falling back to CLIP:', err);
       }
+    } else {
+      console.log('[Angle] No Gemini API key, using CLIP for', entry.file.name);
     }
 
     // Fallback: CLIP zero-shot classification
