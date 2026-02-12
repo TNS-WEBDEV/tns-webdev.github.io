@@ -24,6 +24,8 @@
   const toastEl         = document.getElementById('toast');
   const toastIcon       = document.getElementById('toastIcon');
   const toastMsg        = document.getElementById('toastMessage');
+  const productNameRow  = document.getElementById('productNameRow');
+  const productNameInput = document.getElementById('productNameInput');
   const aiModelStatusEl = document.getElementById('aiModelStatus');
   const aiStatusLabel   = document.getElementById('aiStatusLabel');
   const aiStatusPct     = document.getElementById('aiStatusPct');
@@ -36,10 +38,37 @@
   addMoreInput.accept = fileInput.accept;
 
   // ── State ─────────────────────────────────────────────────────────────
-  let fileEntries = []; // { id, file, removeBg, status, objectUrl, resultUrl, resultBlob }
+  let fileEntries = []; // { id, file, removeBg, status, objectUrl, resultUrl, resultBlob, description, descriptionSource }
   let nextId = 0;
-  let segmenter = null;        // lazy-loaded Transformers.js pipeline
-  let modelLoading = false;    // prevent concurrent init
+  let productName = '';          // batch-level product name for all files
+  let segmenter = null;          // lazy-loaded Transformers.js RMBG pipeline
+  let modelLoading = false;      // prevent concurrent init
+  let classifier = null;         // lazy-loaded CLIP pipeline for angle detection
+  let classifierLoading = false; // prevent concurrent CLIP init
+  let progressBarInUse = false;  // semaphore for shared model status bar
+
+  // ── Angle detection constants ──────────────────────────────────────
+  var ANGLE_LABELS = [
+    'a photo of the front of a product',
+    'a photo of the back of a product',
+    'a photo of the side of a product',
+    'a photo of the top of a product',
+    'a photo of the bottom of a product',
+    'a close-up detail photo of a product',
+    'a lifestyle photo of a product in use',
+  ];
+
+  var LABEL_TO_DUTCH = {
+    'a photo of the front of a product':      'vooraanzicht',
+    'a photo of the back of a product':       'achteraanzicht',
+    'a photo of the side of a product':       'zijaanzicht',
+    'a photo of the top of a product':        'bovenaanzicht',
+    'a photo of the bottom of a product':     'onderaanzicht',
+    'a close-up detail photo of a product':   'detail',
+    'a lifestyle photo of a product in use':  'sfeerbeeld',
+  };
+
+  var ANGLE_CONFIDENCE_THRESHOLD = 0.25;
 
   // ── Helpers ───────────────────────────────────────────────────────────
   function formatBytes(bytes) {
@@ -61,6 +90,42 @@
   // Yield to the browser so it can paint DOM updates
   function yieldToUI() {
     return new Promise(resolve => setTimeout(resolve, 0));
+  }
+
+  function escapeAttr(str) {
+    return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function sanitizeFilename(name) {
+    var cleaned = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '');
+    cleaned = cleaned.replace(/\s+/g, ' ').trim();
+    if (cleaned.length > 200) cleaned = cleaned.substring(0, 200).trim();
+    return cleaned;
+  }
+
+  function buildFilename(entry) {
+    var name = productName.trim();
+    var desc = entry.description.trim();
+    if (name && desc) return sanitizeFilename(name + ' ' + desc) + '.png';
+    if (name) return sanitizeFilename(name) + '.png';
+    if (desc) return sanitizeFilename(desc) + '.png';
+    return entry.file.name.replace(/\.[^.]+$/, '') + '.png';
+  }
+
+  function getDeduplicatedFilename(entry, allEntries) {
+    var base = buildFilename(entry);
+    var baseName = base.replace(/\.png$/, '');
+    var count = 0;
+    for (var i = 0; i < allEntries.length; i++) {
+      if (allEntries[i].id === entry.id) break;
+      if (buildFilename(allEntries[i]).replace(/\.png$/, '') === baseName) count++;
+    }
+    if (count === 0) return base;
+    return baseName + ' ' + (count + 1) + '.png';
   }
 
   // ── Load an image from a File into an HTMLImageElement ────────────────
@@ -128,6 +193,15 @@
     aiProgressFill.style.width = pct + '%';
   }
 
+  function waitForProgressBar() {
+    return new Promise(function (resolve) {
+      (function check() {
+        if (!progressBarInUse) { resolve(); return; }
+        setTimeout(check, 300);
+      })();
+    });
+  }
+
   async function getSegmenter() {
     if (segmenter) return segmenter;
     if (modelLoading) {
@@ -140,8 +214,10 @@
     }
 
     modelLoading = true;
+    await waitForProgressBar();
+    progressBarInUse = true;
     showModelProgress(true);
-    updateModelProgress(0, 'Loading AI model\u2026');
+    updateModelProgress(0, 'Loading background removal model\u2026');
 
     try {
       var mod = await import(
@@ -168,18 +244,20 @@
               totalSize += downloadTracker[key].total;
             }
             var pct = totalSize > 0 ? Math.round((totalLoaded / totalSize) * 100) : 0;
-            updateModelProgress(pct, 'Downloading AI model\u2026');
+            updateModelProgress(pct, 'Downloading background removal model\u2026');
           } else if (info.status === 'ready') {
-            updateModelProgress(100, 'AI model ready');
+            updateModelProgress(100, 'Background removal model ready');
             setTimeout(function () { showModelProgress(false); }, 1500);
           }
         },
       });
 
       modelLoading = false;
+      progressBarInUse = false;
       return segmenter;
     } catch (err) {
       modelLoading = false;
+      progressBarInUse = false;
       segmenter = null;
       showModelProgress(false);
       throw err;
@@ -214,6 +292,89 @@
       src[i] = mask[i]; // copy alpha channel from AI mask
     }
     ctx.putImageData(imageData, 0, 0);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // AI ANGLE DETECTION (Transformers.js + CLIP)
+  // Classifies product photos by viewing angle, maps to Dutch terms.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  async function getClassifier() {
+    if (classifier) return classifier;
+    if (classifierLoading) {
+      return new Promise(function (resolve, reject) {
+        var check = setInterval(function () {
+          if (classifier) { clearInterval(check); resolve(classifier); }
+          if (!classifierLoading) { clearInterval(check); reject(new Error('Classifier loading failed')); }
+        }, 200);
+      });
+    }
+
+    classifierLoading = true;
+    await waitForProgressBar();
+    progressBarInUse = true;
+    showModelProgress(true);
+    updateModelProgress(0, 'Loading angle detection model\u2026');
+
+    try {
+      var mod = await import(
+        'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1'
+      );
+      var pipelineFn = mod.pipeline;
+      var env = mod.env;
+      env.allowLocalModels = false;
+
+      var downloadTracker = {};
+
+      classifier = await pipelineFn('zero-shot-image-classification', 'Xenova/clip-vit-base-patch32', {
+        dtype: 'q8',
+        progress_callback: function (info) {
+          if (!info || !info.status) return;
+          if (info.status === 'progress' && info.file) {
+            downloadTracker[info.file] = { loaded: info.loaded || 0, total: info.total || 1 };
+            var totalLoaded = 0, totalSize = 0;
+            for (var key in downloadTracker) {
+              totalLoaded += downloadTracker[key].loaded;
+              totalSize += downloadTracker[key].total;
+            }
+            var pct = totalSize > 0 ? Math.round((totalLoaded / totalSize) * 100) : 0;
+            updateModelProgress(pct, 'Downloading angle detection model\u2026');
+          } else if (info.status === 'ready') {
+            updateModelProgress(100, 'Angle detection model ready');
+            setTimeout(function () { showModelProgress(false); }, 1500);
+          }
+        },
+      });
+
+      classifierLoading = false;
+      progressBarInUse = false;
+      return classifier;
+    } catch (err) {
+      classifierLoading = false;
+      progressBarInUse = false;
+      classifier = null;
+      showModelProgress(false);
+      throw err;
+    }
+  }
+
+  async function detectAngle(entry) {
+    if (entry.descriptionSource === 'user') return;
+    try {
+      var cls = await getClassifier();
+      if (!fileEntries.find(function (e) { return e.id === entry.id; })) return;
+      var results = await cls(entry.objectUrl, ANGLE_LABELS);
+      if (!fileEntries.find(function (e) { return e.id === entry.id; })) return;
+      if (entry.descriptionSource === 'user') return;
+
+      if (results.length > 0 && results[0].score >= ANGLE_CONFIDENCE_THRESHOLD) {
+        entry.description = LABEL_TO_DUTCH[results[0].label] || '';
+        entry.descriptionSource = 'ai';
+      }
+    } catch (err) {
+      console.warn('Angle detection failed for', entry.file.name, err);
+    }
+    renderList();
   }
 
   // ── Convert a single file entry ──────────────────────────────────────
@@ -260,12 +421,14 @@
   }
 
   // ── Download a single result ─────────────────────────────────────────
-  function downloadEntry(entry) {
+  function downloadEntry(entry, allEntries) {
     if (!entry.resultBlob) return;
-    const baseName = entry.file.name.replace(/\.[^.]+$/, '');
+    var filename = allEntries
+      ? getDeduplicatedFilename(entry, allEntries)
+      : buildFilename(entry);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(entry.resultBlob);
-    a.download = baseName + '.png';
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -286,11 +449,13 @@
     if (done.length === 0) {
       showToast('No files were converted', 'error');
     } else if (done.length === 1) {
-      downloadEntry(done[0]);
+      downloadEntry(done[0], done);
       showToast('Image converted and downloaded', 'success');
     } else {
       for (let i = 0; i < done.length; i++) {
-        setTimeout(() => downloadEntry(done[i]), i * 300);
+        (function (entry, delay) {
+          setTimeout(function () { downloadEntry(entry, done); }, delay);
+        })(done[i], i * 300);
       }
       showToast(done.length + ' images converted and downloading', 'success');
     }
@@ -323,6 +488,8 @@
         objectUrl: URL.createObjectURL(file),
         resultUrl: null,
         resultBlob: null,
+        description: '',
+        descriptionSource: 'none',
       };
       fileEntries.push(entry);
       newEntries.push(entry);
@@ -344,6 +511,11 @@
         }
       });
     }
+
+    // Auto-detect product angles via AI
+    for (const entry of newEntries) {
+      detectAngle(entry);
+    }
   }
 
   // ── Remove a single entry ────────────────────────────────────────────
@@ -363,6 +535,8 @@
       if (e.resultUrl) URL.revokeObjectURL(e.resultUrl);
     });
     fileEntries = [];
+    productName = '';
+    productNameInput.value = '';
     renderList();
   }
 
@@ -372,6 +546,7 @@
     fileListSection.style.display = hasFiles ? '' : 'none';
     convertBar.style.display     = hasFiles ? '' : 'none';
     dropZone.style.display       = hasFiles ? 'none' : '';
+    productNameRow.style.display = hasFiles ? '' : 'none';
 
     fileCountEl.textContent =
       fileEntries.length + (fileEntries.length === 1 ? ' file' : ' files');
@@ -421,11 +596,28 @@
             '<img src="' + thumbSrc + '" alt="' + entry.file.name + '">' +
           '</div>' +
           '<div class="file-info">' +
-            '<div class="file-name" title="' + entry.file.name + '">' + entry.file.name + '</div>' +
+            '<div class="file-name" title="' + escapeAttr(entry.file.name) + '">' + escapeHtml(entry.file.name) + '</div>' +
             '<div class="file-meta">' +
               '<span>' + formatBytes(entry.file.size) + '</span>' +
               '<span>' + entry.file.type.split('/')[1].toUpperCase() + '</span>' +
               '<span class="status-badge ' + statusClass + '">' + statusLabel + '</span>' +
+            '</div>' +
+            '<div class="file-description">' +
+              '<input type="text" class="description-input" ' +
+                'data-action="editDescription" data-id="' + entry.id + '" ' +
+                'value="' + escapeAttr(entry.description) + '" ' +
+                'placeholder="' + (entry.descriptionSource === 'none' && entry.description === '' ? 'Detecting angle\u2026' : 'Add description\u2026') + '"' +
+                (entry.status === 'processing' ? ' disabled' : '') + '>' +
+              (entry.descriptionSource === 'ai'
+                ? '<span class="description-ai-badge" title="AI-generated">AI</span>'
+                : '') +
+            '</div>' +
+            '<div class="filename-preview" title="Download filename">' +
+              '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>' +
+                '<polyline points="14 2 14 8 20 8"/>' +
+              '</svg>' +
+              '<span class="filename-preview-text">' + escapeHtml(buildFilename(entry)) + '</span>' +
             '</div>' +
           '</div>' +
           '<div class="file-options">' +
@@ -495,6 +687,41 @@
     renderList();
   });
 
+  // ── Description input (delegated, targeted update to avoid losing focus)
+  fileListEl.addEventListener('input', function (e) {
+    if (!e.target.classList.contains('description-input')) return;
+    var id = parseInt(e.target.dataset.id, 10);
+    var entry = fileEntries.find(function (item) { return item.id === id; });
+    if (!entry) return;
+
+    entry.description = e.target.value;
+    entry.descriptionSource = e.target.value.trim() ? 'user' : 'none';
+
+    // Update only the filename preview for this row (not a full re-render)
+    var fileItem = e.target.closest('.file-item');
+    if (fileItem) {
+      var preview = fileItem.querySelector('.filename-preview-text');
+      if (preview) preview.textContent = buildFilename(entry);
+      // Hide/show AI badge
+      var badge = fileItem.querySelector('.description-ai-badge');
+      if (badge) badge.remove();
+    }
+  });
+
+  // ── Product name input ────────────────────────────────────────────
+  productNameInput.addEventListener('input', function () {
+    productName = productNameInput.value;
+    // Update all filename previews without full re-render
+    document.querySelectorAll('.file-item').forEach(function (el) {
+      var id = parseInt(el.dataset.id, 10);
+      var entry = fileEntries.find(function (e) { return e.id === id; });
+      if (entry) {
+        var preview = el.querySelector('.filename-preview-text');
+        if (preview) preview.textContent = buildFilename(entry);
+      }
+    });
+  });
+
   // ── Drop zone events ─────────────────────────────────────────────────
   dropZone.addEventListener('dragover', function (e) {
     e.preventDefault();
@@ -542,7 +769,7 @@
       var done = fileEntries.filter(function (e) { return e.status === 'done'; });
       for (var i = 0; i < done.length; i++) {
         (function (entry, delay) {
-          setTimeout(function () { downloadEntry(entry); }, delay);
+          setTimeout(function () { downloadEntry(entry, done); }, delay);
         })(done[i], i * 300);
       }
       showToast('Downloading ' + done.length + ' file' + (done.length !== 1 ? 's' : ''), 'success');
