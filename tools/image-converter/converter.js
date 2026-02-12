@@ -49,26 +49,44 @@
 
   // ── Angle detection constants ──────────────────────────────────────
   var ANGLE_LABELS = [
-    'a photo of the front of a product',
-    'a photo of the back of a product',
-    'a photo of the side of a product',
-    'a photo of the top of a product',
-    'a photo of the bottom of a product',
-    'a close-up detail photo of a product',
-    'a lifestyle photo of a product in use',
+    // Direct / flat views (camera perpendicular to one face)
+    'a flat straight-on photo showing only the front of a product',
+    'a flat straight-on photo showing only the side of a product',
+    'a flat straight-on photo showing only the back of a product',
+    'a flat straight-on photo showing only the top of a product',
+    'a flat straight-on photo showing only the bottom of a product',
+    // Angled / perspective views (main face visible but at an angle)
+    'a perspective photo of a product at an angle with the front side prominent',
+    'a perspective photo of a product at an angle with the side prominent',
+    'a perspective photo of a product at an angle with the back side prominent',
+    'a perspective photo of a product at an angle with the top side prominent',
+    'a perspective photo of a product at an angle with the bottom side prominent',
+    // Special categories
+    'a close-up detail photo showing a specific feature of a product',
+    'a photo of a remote control device',
+    'a lifestyle photo of a product being used in a real environment or room',
   ];
 
   var LABEL_TO_DUTCH = {
-    'a photo of the front of a product':      'vooraanzicht',
-    'a photo of the back of a product':       'achteraanzicht',
-    'a photo of the side of a product':       'zijaanzicht',
-    'a photo of the top of a product':        'bovenaanzicht',
-    'a photo of the bottom of a product':     'onderaanzicht',
-    'a close-up detail photo of a product':   'detail',
-    'a lifestyle photo of a product in use':  'sfeerbeeld',
+    // Direct / flat views
+    'a flat straight-on photo showing only the front of a product':             'voorkant',
+    'a flat straight-on photo showing only the side of a product':              'zijkant',
+    'a flat straight-on photo showing only the back of a product':              'achterkant',
+    'a flat straight-on photo showing only the top of a product':               'bovenkant',
+    'a flat straight-on photo showing only the bottom of a product':            'onderkant',
+    // Angled / perspective views
+    'a perspective photo of a product at an angle with the front side prominent': 'vooraanzicht',
+    'a perspective photo of a product at an angle with the side prominent':       'zijaanzicht',
+    'a perspective photo of a product at an angle with the back side prominent':  'achterzijde',
+    'a perspective photo of a product at an angle with the top side prominent':   'bovenzijde',
+    'a perspective photo of a product at an angle with the bottom side prominent':'onderzijde',
+    // Special categories
+    'a close-up detail photo showing a specific feature of a product':           'detail',
+    'a photo of a remote control device':                                        'afstandsbediening',
+    'a lifestyle photo of a product being used in a real environment or room':    'scenario',
   };
 
-  var ANGLE_CONFIDENCE_THRESHOLD = 0.25;
+  var ANGLE_CONFIDENCE_THRESHOLD = 0.20;
 
   // ── Helpers ───────────────────────────────────────────────────────────
   function formatBytes(bytes) {
@@ -368,11 +386,19 @@
       if (entry.descriptionSource === 'user') return;
 
       if (results.length > 0 && results[0].score >= ANGLE_CONFIDENCE_THRESHOLD) {
-        entry.description = LABEL_TO_DUTCH[results[0].label] || '';
-        entry.descriptionSource = 'ai';
+        entry.description = LABEL_TO_DUTCH[results[0].label] || 'detail';
+      } else {
+        // Fallback: use "detail" as catch-all when confidence is too low
+        entry.description = 'detail';
       }
+      entry.descriptionSource = 'ai';
     } catch (err) {
       console.warn('Angle detection failed for', entry.file.name, err);
+      // On failure, still fall back to "detail"
+      if (entry.descriptionSource !== 'user') {
+        entry.description = 'detail';
+        entry.descriptionSource = 'ai';
+      }
     }
     renderList();
   }
