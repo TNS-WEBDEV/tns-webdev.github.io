@@ -879,63 +879,6 @@ a {
   animation: pulse 1.5s ease-in-out infinite;
 }
 
-/* ===== Background Removal Mode Toggle ===== */
-.bg-mode-global {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.bg-mode-label {
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.segmented-toggle {
-  display: inline-flex;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.seg-btn {
-  padding: 4px 12px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  font-family: inherit;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: var(--transition);
-  white-space: nowrap;
-}
-
-.seg-btn:hover {
-  color: var(--text-secondary);
-}
-
-.seg-btn.active {
-  background: var(--accent);
-  color: white;
-}
-
-.file-bg-mode {
-  display: inline-flex;
-  margin-left: 8px;
-}
-
-.file-bg-mode .segmented-toggle {
-  border-radius: 4px;
-}
-
-.file-bg-mode .seg-btn {
-  padding: 2px 8px;
-  font-size: 0.7rem;
-}
-
 /* AI Model Status Bar */
 .ai-model-status {
   background: var(--bg-card);

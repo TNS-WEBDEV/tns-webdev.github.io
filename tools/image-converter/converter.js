@@ -24,8 +24,6 @@
   const toastEl         = document.getElementById('toast');
   const toastIcon       = document.getElementById('toastIcon');
   const toastMsg        = document.getElementById('toastMessage');
-  const bgModeGlobal    = document.getElementById('bgModeGlobal');
-  const globalModeToggle = document.getElementById('globalModeToggle');
   const aiModelStatusEl = document.getElementById('aiModelStatus');
   const aiStatusLabel   = document.getElementById('aiStatusLabel');
   const aiStatusPct     = document.getElementById('aiStatusPct');
@@ -38,9 +36,8 @@
   addMoreInput.accept = fileInput.accept;
 
   // ── State ─────────────────────────────────────────────────────────────
-  let fileEntries = []; // { id, file, removeBg, bgMode, status, objectUrl, resultUrl, resultBlob }
+  let fileEntries = []; // { id, file, removeBg, status, objectUrl, resultUrl, resultBlob }
   let nextId = 0;
-  let defaultBgMode = 'quick'; // 'quick' | 'ai'
   let segmenter = null;        // lazy-loaded Transformers.js pipeline
   let modelLoading = false;    // prevent concurrent init
 
@@ -80,351 +77,40 @@
     });
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // SMART BACKGROUND REMOVAL
-  //
-  // Pipeline:
-  //   1. Sample background colours from the 4 image edges
-  //   2. Compute luminance → Gaussian blur → Sobel edge map
-  //   3. Edge-aware BFS from borders:
-  //        • background-colour match  → can cross weak/moderate edges
-  //        • local-similarity match   → can only cross very weak edges
-  //        • strong edge              → always blocks
-  //   4. Morphological close to fill tiny mask holes
-  //   5. Multi-radius alpha feathering at mask boundary
-  //
-  // This handles solid, gradient and textured backgrounds of any colour
-  // without eating into the subject.
-  // ═══════════════════════════════════════════════════════════════════════
+  // ── Check whether an image file already has a transparency layer ─────
+  function imageHasTransparency(file) {
+    return new Promise(function (resolve) {
+      if (file.type === 'image/svg+xml') { resolve(true); return; }
 
-  // ── Helper: average colour in a rectangular region ───────────────────
-  function averageColorInRect(data, stride, x0, y0, x1, y1) {
-    var r = 0, g = 0, b = 0, n = 0;
-    for (var y = y0; y < y1; y++) {
-      for (var x = x0; x < x1; x++) {
-        var o = (y * stride + x) * 4;
-        if (data[o + 3] < 10) continue;
-        r += data[o]; g += data[o + 1]; b += data[o + 2]; n++;
-      }
-    }
-    if (n === 0) return null;
-    return { r: r / n, g: g / n, b: b / n };
-  }
+      var img = new Image();
+      var url = URL.createObjectURL(file);
+      img.onload = function () {
+        var tc = document.createElement('canvas');
+        var tctx = tc.getContext('2d', { willReadFrequently: true });
+        tc.width = img.naturalWidth;
+        tc.height = img.naturalHeight;
+        tctx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
 
-  // ── Main entry point ────────────────────────────────────────────────
-  function removeBackground(imageData) {
-    var data   = imageData.data;
-    var width  = imageData.width;
-    var height = imageData.height;
-    var total  = width * height;
+        var data = tctx.getImageData(0, 0, tc.width, tc.height).data;
+        var total = data.length / 4;
+        var step = Math.max(1, Math.floor(total / 50000));
+        var transparentCount = 0;
+        var sampledCount = 0;
 
-    // ── 1. Sample background colours from the four edges ──────────────
-    var BORDER = Math.max(3, Math.min(10,
-                   Math.floor(Math.min(width, height) * 0.02)));
-
-    var bgColors = [
-      averageColorInRect(data, width, 0, 0, width, BORDER),              // top
-      averageColorInRect(data, width, 0, height - BORDER, width, height), // bottom
-      averageColorInRect(data, width, 0, 0, BORDER, height),              // left
-      averageColorInRect(data, width, width - BORDER, 0, width, height),  // right
-    ].filter(Boolean); // drop null (fully-transparent edges)
-
-    // Also add the four corner averages for better gradient coverage
-    var CS = Math.max(BORDER, Math.floor(Math.min(width, height) * 0.05));
-    var corners = [
-      averageColorInRect(data, width, 0, 0, CS, CS),
-      averageColorInRect(data, width, width - CS, 0, width, CS),
-      averageColorInRect(data, width, 0, height - CS, CS, height),
-      averageColorInRect(data, width, width - CS, height - CS, width, height),
-    ].filter(Boolean);
-    for (var ci = 0; ci < corners.length; ci++) bgColors.push(corners[ci]);
-
-    if (bgColors.length === 0) return imageData; // nothing to do
-
-    // ── 2. Edge map: luminance → blur → Sobel ─────────────────────────
-    var lum = new Float32Array(total);
-    for (var i = 0; i < total; i++) {
-      var o4 = i * 4;
-      lum[i] = 0.299 * data[o4] + 0.587 * data[o4 + 1] + 0.114 * data[o4 + 2];
-    }
-
-    // 3×3 Gaussian blur (reduces noise + texture so Sobel sees real edges)
-    var blurred = new Float32Array(total);
-    for (var by = 1; by < height - 1; by++) {
-      for (var bx = 1; bx < width - 1; bx++) {
-        var bi = by * width + bx;
-        blurred[bi] = (
-          lum[bi - width - 1]     + 2 * lum[bi - width] + lum[bi - width + 1] +
-          2 * lum[bi - 1]         + 4 * lum[bi]          + 2 * lum[bi + 1] +
-          lum[bi + width - 1]     + 2 * lum[bi + width]  + lum[bi + width + 1]
-        ) / 16;
-      }
-    }
-    // Copy unblurred border rows/columns
-    for (var ex = 0; ex < width; ex++) {
-      blurred[ex] = lum[ex];
-      blurred[(height - 1) * width + ex] = lum[(height - 1) * width + ex];
-    }
-    for (var ey = 0; ey < height; ey++) {
-      blurred[ey * width] = lum[ey * width];
-      blurred[ey * width + width - 1] = lum[ey * width + width - 1];
-    }
-
-    // Sobel gradient magnitude  (reuse `lum` array to store edges)
-    var edges = lum; // alias — lum is no longer needed
-    for (var si = 0; si < total; si++) edges[si] = 0; // clear
-    for (var sy = 1; sy < height - 1; sy++) {
-      for (var sx = 1; sx < width - 1; sx++) {
-        var idx = sy * width + sx;
-        var tl = blurred[idx - width - 1], tc = blurred[idx - width], tr = blurred[idx - width + 1];
-        var ml = blurred[idx - 1],                                     mr = blurred[idx + 1];
-        var bl = blurred[idx + width - 1], bc = blurred[idx + width], br = blurred[idx + width + 1];
-        var gx = -tl + tr - 2 * ml + 2 * mr - bl + br;
-        var gy = -tl - 2 * tc - tr  + bl + 2 * bc + br;
-        edges[idx] = Math.sqrt(gx * gx + gy * gy);
-      }
-    }
-    blurred = null; // allow GC
-
-    // ── 3. Edge-aware BFS from image borders ──────────────────────────
-    var visited = new Uint8Array(total); // 0=unvisited, 1=background
-    var queue   = new Int32Array(total);
-    var qHead   = 0, qTail = 0;
-
-    // Thresholds (squared where applicable for speed)
-    var BG_TOL_SQ    = 70 * 70;   // match any sampled background colour
-    var LOCAL_TOL_SQ = 35 * 35;   // match immediate neighbour
-    var EDGE_HARD    = 80;        // never cross
-    var EDGE_SOFT    = 25;        // local-similarity only below this
-
-    // -- Does pixel i match any background colour? --
-    function matchesBg(pi) {
-      var po = pi * 4;
-      var pr = data[po], pg = data[po + 1], pb = data[po + 2];
-      for (var k = 0; k < bgColors.length; k++) {
-        var dr = pr - bgColors[k].r;
-        var dg = pg - bgColors[k].g;
-        var db = pb - bgColors[k].b;
-        if (dr * dr + dg * dg + db * db < BG_TOL_SQ) return true;
-      }
-      return false;
-    }
-
-    // -- Are two pixels locally similar? --
-    function localSimilar(a, b) {
-      var oa = a * 4, ob = b * 4;
-      var dr = data[oa] - data[ob];
-      var dg = data[oa + 1] - data[ob + 1];
-      var db = data[oa + 2] - data[ob + 2];
-      return (dr * dr + dg * dg + db * db) < LOCAL_TOL_SQ;
-    }
-
-    // -- Attempt to expand from pixel `from` into pixel `ni` --
-    function tryExpand(from, ni) {
-      if (visited[ni]) return;
-      if (data[ni * 4 + 3] < 10) { visited[ni] = 1; return; } // already transparent
-
-      var e = edges[ni];
-      if (e >= EDGE_HARD) return;                      // hard edge — never cross
-
-      if (matchesBg(ni)) {                             // bg-colour match → cross moderate edges
-        visited[ni] = 1;
-        queue[qTail++] = ni;
-      } else if (e < EDGE_SOFT && localSimilar(from, ni)) { // gradient follow → weak edges only
-        visited[ni] = 1;
-        queue[qTail++] = ni;
-      }
-    }
-
-    // Seed: border pixels that look like background
-    for (var tx = 0; tx < width; tx++) {
-      var t = tx;
-      if (data[t * 4 + 3] >= 10 && matchesBg(t)) { visited[t] = 1; queue[qTail++] = t; }
-      t = (height - 1) * width + tx;
-      if (!visited[t] && data[t * 4 + 3] >= 10 && matchesBg(t)) { visited[t] = 1; queue[qTail++] = t; }
-    }
-    for (var ty = 1; ty < height - 1; ty++) {
-      var tl2 = ty * width;
-      if (!visited[tl2] && data[tl2 * 4 + 3] >= 10 && matchesBg(tl2)) { visited[tl2] = 1; queue[qTail++] = tl2; }
-      var tr2 = ty * width + width - 1;
-      if (!visited[tr2] && data[tr2 * 4 + 3] >= 10 && matchesBg(tr2)) { visited[tr2] = 1; queue[qTail++] = tr2; }
-    }
-
-    // Run BFS
-    while (qHead < qTail) {
-      var cur = queue[qHead++];
-      var cx  = cur % width;
-      var cy  = (cur - cx) / width;
-
-      // Make background pixel transparent
-      data[cur * 4 + 3] = 0;
-
-      // Expand into 4-connected neighbours
-      if (cx > 0)            tryExpand(cur, cur - 1);
-      if (cx < width - 1)    tryExpand(cur, cur + 1);
-      if (cy > 0)            tryExpand(cur, cur - width);
-      if (cy < height - 1)   tryExpand(cur, cur + width);
-    }
-
-    // ── 4. Mask cleanup ────────────────────────────────────────────────
-    //    a) Morphological close: fills tiny 1-2px holes in the mask
-    //    b) Fringe expansion: grow the mask by 1px to eat the anti-alias
-    //       halo that the original image baked against its background
-    var mask = visited; // 1 = background (removed)
-
-    // 4a — Close: dilate then erode to fill small holes
-    var dilated = new Uint8Array(total);
-    for (var dy = 1; dy < height - 1; dy++) {
-      for (var dx = 1; dx < width - 1; dx++) {
-        var di = dy * width + dx;
-        if (mask[di]) { dilated[di] = 1; continue; }
-        var nb = mask[di - 1] + mask[di + 1] + mask[di - width] + mask[di + width];
-        if (nb >= 3) dilated[di] = 1;
-      }
-    }
-    for (var ery = 1; ery < height - 1; ery++) {
-      for (var erx = 1; erx < width - 1; erx++) {
-        var ei = ery * width + erx;
-        if (!dilated[ei]) continue;
-        if (mask[ei]) continue;
-        var enb = dilated[ei - 1] + dilated[ei + 1] + dilated[ei - width] + dilated[ei + width];
-        if (enb >= 3) { data[ei * 4 + 3] = 0; mask[ei] = 1; }
-      }
-    }
-
-    // 4b — Fringe expansion: absorb boundary pixels that sit on an
-    //       actual edge AND whose colour is close to the background.
-    //       Both conditions must be true to avoid eating into subjects
-    //       whose colour happens to resemble the background (e.g. a
-    //       white product on a white background).
-    var fringe = new Uint8Array(total);
-    var FRINGE_TOL_SQ = 50 * 50;  // tighter — only genuine fringe blends
-    var FRINGE_EDGE_MIN = 15;     // needs an actual colour transition
-    for (var fey = 1; fey < height - 1; fey++) {
-      for (var fex = 1; fex < width - 1; fex++) {
-        var fi2 = fey * width + fex;
-        if (mask[fi2]) continue;
-        if (data[fi2 * 4 + 3] < 10) continue;
-        // Must be adjacent to mask (boundary pixel)
-        if (!mask[fi2 - 1] && !mask[fi2 + 1] && !mask[fi2 - width] && !mask[fi2 + width]) continue;
-        // Must sit on an actual edge — otherwise it's a smooth surface
-        if (edges[fi2] < FRINGE_EDGE_MIN) continue;
-        // Must be close in colour to the background
-        var fo = fi2 * 4;
-        var fr = data[fo], fg = data[fo + 1], fb = data[fo + 2];
-        var isFringe = false;
-        for (var fk = 0; fk < bgColors.length; fk++) {
-          var fdr = fr - bgColors[fk].r;
-          var fdg = fg - bgColors[fk].g;
-          var fdb = fb - bgColors[fk].b;
-          if (fdr * fdr + fdg * fdg + fdb * fdb < FRINGE_TOL_SQ) { isFringe = true; break; }
+        for (var i = 0; i < total; i += step) {
+          sampledCount++;
+          if (data[i * 4 + 3] < 250) transparentCount++;
         }
-        if (isFringe) fringe[fi2] = 1;
-      }
-    }
-    // Apply fringe removal
-    for (var fri = 0; fri < total; fri++) {
-      if (fringe[fri]) { data[fri * 4 + 3] = 0; mask[fri] = 1; }
-    }
 
-    // ── 5. Color decontamination ────────────────────────────────────
-    //    Edge pixels in the original image were anti-aliased against the
-    //    background, so their RGB is a blend of subject + bg colour.
-    //    We estimate the bg contribution and subtract it so the cutout
-    //    looks clean against any new background.
-    //
-    //    Formula: assuming original pixel = α·fg + (1−α)·bg
-    //    where α is the "true" foreground fraction estimated from
-    //    neighbourhood context. We solve for fg:
-    //       fg = (pixel − (1−α)·bg) / α   [clamped to 0–255]
-
-    // Compute the overall average background colour for decontamination
-    var avgBgR = 0, avgBgG = 0, avgBgB = 0;
-    for (var bci = 0; bci < bgColors.length; bci++) {
-      avgBgR += bgColors[bci].r; avgBgG += bgColors[bci].g; avgBgB += bgColors[bci].b;
-    }
-    avgBgR /= bgColors.length; avgBgG /= bgColors.length; avgBgB /= bgColors.length;
-
-    // Only decontaminate pixels whose colour is actually close enough
-    // to the background that blending is plausible.  For a dark subject
-    // on a light background (or vice-versa) the edge pixels are already
-    // dominated by the subject colour and decontamination would distort
-    // them (e.g. make a white projector edge turn grey/dark).
-    var DECON_MAX_DIST_SQ = 90 * 90; // only decontaminate if within this distance of bg
-
-    for (var dcy = 1; dcy < height - 1; dcy++) {
-      for (var dcx = 1; dcx < width - 1; dcx++) {
-        var dci = dcy * width + dcx;
-        if (mask[dci]) continue;
-        var dco = dci * 4;
-        if (data[dco + 3] < 10) continue;
-
-        // Count removed neighbours in 3×3 to detect boundary pixels
-        var dcRemoved = 0;
-        for (var dky = -1; dky <= 1; dky++) {
-          for (var dkx = -1; dkx <= 1; dkx++) {
-            if (dkx === 0 && dky === 0) continue;
-            if (mask[(dcy + dky) * width + (dcx + dkx)]) dcRemoved++;
-          }
-        }
-        if (dcRemoved === 0) continue; // interior pixel — skip
-
-        // Check distance to background — skip if pixel is far from bg
-        var dcR = data[dco], dcG = data[dco + 1], dcB = data[dco + 2];
-        var dcDr = dcR - avgBgR, dcDg = dcG - avgBgG, dcDb = dcB - avgBgB;
-        var dcDistSq = dcDr * dcDr + dcDg * dcDg + dcDb * dcDb;
-        if (dcDistSq > DECON_MAX_DIST_SQ) continue; // not contaminated
-
-        // Strength proportional to how close the pixel is to the bg
-        var dcStrength = 1.0 - Math.sqrt(dcDistSq) / 90;  // 1 = very close, 0 = far
-        var fgFrac = 1.0 - (dcRemoved / 8) * 0.5 * dcStrength;
-        if (fgFrac < 0.5) fgFrac = 0.5;
-
-        // Decontaminate RGB
-        var invFg = 1.0 / fgFrac;
-        var bgContrib = 1.0 - fgFrac;
-        data[dco]     = Math.max(0, Math.min(255, Math.round((data[dco]     - bgContrib * avgBgR) * invFg)));
-        data[dco + 1] = Math.max(0, Math.min(255, Math.round((data[dco + 1] - bgContrib * avgBgG) * invFg)));
-        data[dco + 2] = Math.max(0, Math.min(255, Math.round((data[dco + 2] - bgContrib * avgBgB) * invFg)));
-
-        // Reduce alpha gently
-        data[dco + 3] = Math.max(0, Math.round(data[dco + 3] * fgFrac));
-      }
-    }
-
-    // ── 6. Smooth alpha feathering ──────────────────────────────────
-    //    Final pass: gentle alpha fade on any remaining boundary pixels
-    //    using a 5×5 neighbourhood ratio.
-    for (var fy = 2; fy < height - 2; fy++) {
-      for (var fx = 2; fx < width - 2; fx++) {
-        var fi = fy * width + fx;
-        if (mask[fi]) continue;
-        var foff = fi * 4;
-        if (data[foff + 3] < 5) continue;
-
-        var fremoved = 0, fneighbours = 0;
-        for (var fky = -2; fky <= 2; fky++) {
-          for (var fkx = -2; fkx <= 2; fkx++) {
-            if (fkx === 0 && fky === 0) continue;
-            fneighbours++;
-            if (mask[(fy + fky) * width + (fx + fkx)]) fremoved++;
-          }
-        }
-        if (fremoved === 0) continue;
-
-        var fRatio = fremoved / fneighbours;
-        var fMul;
-        if (fRatio > 0.75)      fMul = 0.1;  // nearly surrounded → mostly remove
-        else if (fRatio > 0.5)  fMul = 0.35;
-        else if (fRatio > 0.3)  fMul = 0.6;
-        else if (fRatio > 0.15) fMul = 0.8;
-        else continue;
-
-        data[foff + 3] = Math.round(data[foff + 3] * fMul);
-      }
-    }
-
-    return imageData;
+        resolve(transparentCount / sampledCount > 0.005);
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        resolve(false);
+      };
+      img.src = url;
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -547,13 +233,7 @@
       ctx.drawImage(img, 0, 0);
 
       if (entry.removeBg) {
-        if (entry.bgMode === 'ai') {
-          await aiRemoveBackground(entry, img);
-        } else {
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          removeBackground(imageData);
-          ctx.putImageData(imageData, 0, 0);
-        }
+        await aiRemoveBackground(entry, img);
       }
 
       URL.revokeObjectURL(url);
@@ -632,18 +312,20 @@
     ];
 
     let added = 0;
+    const newEntries = [];
     for (const file of files) {
       if (!validTypes.includes(file.type)) continue;
-      fileEntries.push({
+      const entry = {
         id: nextId++,
         file,
-        removeBg: false,
-        bgMode: defaultBgMode,
+        removeBg: true,
         status: 'pending',
         objectUrl: URL.createObjectURL(file),
         resultUrl: null,
         resultBlob: null,
-      });
+      };
+      fileEntries.push(entry);
+      newEntries.push(entry);
       added++;
     }
 
@@ -652,6 +334,16 @@
     }
 
     renderList();
+
+    // Auto-disable background removal for images that already have transparency
+    for (const entry of newEntries) {
+      imageHasTransparency(entry.file).then(function (hasAlpha) {
+        if (hasAlpha && entry.status === 'pending' && !entry._userToggled) {
+          entry.removeBg = false;
+          renderList();
+        }
+      });
+    }
   }
 
   // ── Remove a single entry ────────────────────────────────────────────
@@ -680,7 +372,6 @@
     fileListSection.style.display = hasFiles ? '' : 'none';
     convertBar.style.display     = hasFiles ? '' : 'none';
     dropZone.style.display       = hasFiles ? 'none' : '';
-    bgModeGlobal.style.display   = hasFiles ? '' : 'none';
 
     fileCountEl.textContent =
       fileEntries.length + (fileEntries.length === 1 ? ' file' : ' files');
@@ -708,13 +399,13 @@
     fileListEl.innerHTML = fileEntries.map(function (entry) {
       var statusLabel = {
         pending: 'Pending',
-        processing: (entry.removeBg && entry.bgMode === 'ai') ? 'AI processing\u2026' : 'Converting\u2026',
+        processing: entry.removeBg ? 'AI processing\u2026' : 'Converting\u2026',
         done: 'Done',
         error: 'Error',
       }[entry.status];
 
       var statusClass = entry.status;
-      if (entry.status === 'processing' && entry.removeBg && entry.bgMode === 'ai') {
+      if (entry.status === 'processing' && entry.removeBg) {
         statusClass = 'ai-processing';
       }
 
@@ -745,20 +436,6 @@
               '<span class="checkbox-visual"></span>' +
               '<span class="remove-bg-label">Remove background</span>' +
             '</label>' +
-            (entry.removeBg
-              ? '<div class="file-bg-mode">' +
-                  '<div class="segmented-toggle" data-action="modeToggle" data-id="' + entry.id + '">' +
-                    '<button class="seg-btn' + (entry.bgMode === 'quick' ? ' active' : '') +
-                      '" data-mode="quick"' +
-                      (entry.status === 'processing' ? ' disabled' : '') +
-                      '>Quick</button>' +
-                    '<button class="seg-btn' + (entry.bgMode === 'ai' ? ' active' : '') +
-                      '" data-mode="ai"' +
-                      (entry.status === 'processing' ? ' disabled' : '') +
-                      '>AI</button>' +
-                  '</div>' +
-                '</div>'
-              : '') +
           '</div>' +
           '<div class="file-actions">' +
             (entry.status === 'done'
@@ -784,29 +461,6 @@
 
   // ── Event delegation for file list actions ───────────────────────────
   fileListEl.addEventListener('click', function (e) {
-    // Per-file mode toggle (Quick / AI)
-    var modeBtn = e.target.closest('.seg-btn');
-    if (modeBtn) {
-      var toggleEl = modeBtn.closest('[data-action="modeToggle"]');
-      if (toggleEl) {
-        var modeId = parseInt(toggleEl.dataset.id, 10);
-        var modeEntry = fileEntries.find(function (item) { return item.id === modeId; });
-        if (modeEntry && modeEntry.status !== 'processing') {
-          modeEntry.bgMode = modeBtn.dataset.mode;
-          if (modeEntry.status === 'done') {
-            modeEntry.status = 'pending';
-            modeEntry.resultBlob = null;
-            if (modeEntry.resultUrl) {
-              URL.revokeObjectURL(modeEntry.resultUrl);
-              modeEntry.resultUrl = null;
-            }
-          }
-          renderList();
-        }
-        return;
-      }
-    }
-
     var btn = e.target.closest('[data-action]');
     if (!btn) return;
     var id = parseInt(btn.dataset.id, 10);
@@ -827,11 +481,7 @@
     if (!entry) return;
 
     entry.removeBg = e.target.checked;
-
-    // When enabling, apply the current global default mode
-    if (entry.removeBg) {
-      entry.bgMode = defaultBgMode;
-    }
+    entry._userToggled = true;
 
     // If already converted, reset so it can be re-converted with the new setting
     if (entry.status === 'done') {
@@ -843,16 +493,6 @@
       }
     }
     renderList();
-  });
-
-  // ── Global mode toggle (Quick / AI default) ─────────────────────────
-  globalModeToggle.addEventListener('click', function (e) {
-    var btn = e.target.closest('.seg-btn');
-    if (!btn) return;
-    defaultBgMode = btn.dataset.mode;
-    globalModeToggle.querySelectorAll('.seg-btn').forEach(function (b) {
-      b.classList.toggle('active', b.dataset.mode === defaultBgMode);
-    });
   });
 
   // ── Drop zone events ─────────────────────────────────────────────────
