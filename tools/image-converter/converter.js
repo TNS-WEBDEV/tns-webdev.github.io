@@ -30,6 +30,10 @@
   const aiStatusLabel   = document.getElementById('aiStatusLabel');
   const aiStatusPct     = document.getElementById('aiStatusPct');
   const aiProgressFill  = document.getElementById('aiProgressFill');
+  const settingsToggle  = document.getElementById('settingsToggle');
+  const aiSettingsPanel = document.getElementById('aiSettingsPanel');
+  const geminiApiKeyInput = document.getElementById('geminiApiKeyInput');
+  const apiKeyStatus    = document.getElementById('apiKeyStatus');
 
   // Hidden input for "Add More" button
   const addMoreInput = document.createElement('input');
@@ -46,6 +50,7 @@
   let classifier = null;         // lazy-loaded CLIP pipeline for angle detection
   let classifierLoading = false; // prevent concurrent CLIP init
   let progressBarInUse = false;  // semaphore for shared model status bar
+  let geminiApiKey = localStorage.getItem('tns-gemini-api-key') || '';
 
   // ── Angle detection constants ──────────────────────────────────────
   var ANGLE_LABELS = [
@@ -376,8 +381,131 @@
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // AI ANGLE DETECTION — GEMINI 2.5 FLASH (primary, requires API key)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  var VALID_DESCRIPTIONS = [
+    'voorkant', 'vooraanzicht', 'zijkant', 'zijaanzicht',
+    'achterkant', 'achterzijde', 'bovenkant', 'bovenzijde',
+    'onderkant', 'onderzijde', 'detail', 'afstandsbediening', 'scenario',
+  ];
+
+  var GEMINI_PROMPT = [
+    'You are classifying product photography for an e-commerce catalog.',
+    'Analyze this image and respond with EXACTLY one of these category names (nothing else, no explanation):',
+    '',
+    'voorkant - The front of the product is directly facing the camera (flat, straight-on view)',
+    'vooraanzicht - The front of the product is the main focus but the camera is at an angle (showing depth/perspective, multiple sides visible)',
+    'zijkant - The side of the product is directly facing the camera (flat, straight-on view)',
+    'zijaanzicht - The side of the product is the main focus but the camera is at an angle (showing depth/perspective)',
+    'achterkant - The back/rear of the product is directly facing the camera (flat, straight-on view, often showing ports/connectors)',
+    'achterzijde - The back/rear of the product is the main focus but the camera is at an angle',
+    'bovenkant - The top of the product is directly facing the camera (looking straight down, bird\'s eye view)',
+    'bovenzijde - The top of the product is the main focus but the camera is at an angle (showing depth)',
+    'onderkant - The bottom of the product is directly facing the camera (looking straight up)',
+    'onderzijde - The bottom of the product is the main focus but the camera is at an angle',
+    'detail - A close-up photo focusing on a specific feature, port, button, label, or detail of the product',
+    'afstandsbediening - The image shows a remote control as the main subject (a separate handheld accessory with buttons)',
+    'scenario - The product is shown being used in a real environment or setting (lifestyle/scenario photo, product in context)',
+    '',
+    'Important distinctions:',
+    '- "-kant" suffixes = flat, straight-on, single-face view (camera perpendicular to surface)',
+    '- "-aanzicht"/"-zijde" suffixes = angled perspective view (camera at an angle, showing depth, multiple faces visible)',
+    '- "afstandsbediening" = ONLY for actual remote controls as the main subject, NOT for products that happen to look rectangular',
+    '- "detail" = close-up of a specific small feature, not a full product shot',
+    '',
+    'Respond with ONLY the category name.',
+  ].join('\n');
+
+  function fileToBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        // result is "data:<mime>;base64,<data>" — extract the base64 part
+        resolve(reader.result.split(',')[1]);
+      };
+      reader.onerror = function () { reject(new Error('Failed to read file')); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function detectAngleGemini(entry) {
+    var base64 = await fileToBase64(entry.file);
+    var mimeType = entry.file.type || 'image/jpeg';
+
+    var response = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + encodeURIComponent(geminiApiKey),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: GEMINI_PROMPT },
+              { inline_data: { mime_type: mimeType, data: base64 } },
+            ],
+          }],
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: 20,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      var errBody = await response.text().catch(function () { return ''; });
+      throw new Error('Gemini API error ' + response.status + ': ' + errBody);
+    }
+
+    var data = await response.json();
+    var text = '';
+    if (data.candidates && data.candidates[0] && data.candidates[0].content &&
+        data.candidates[0].content.parts && data.candidates[0].content.parts[0]) {
+      text = data.candidates[0].content.parts[0].text.trim().toLowerCase();
+    }
+
+    // Validate the response is one of our valid descriptions
+    if (VALID_DESCRIPTIONS.indexOf(text) !== -1) {
+      return text;
+    }
+
+    // Try to match partial / fuzzy (in case Gemini adds punctuation or extra text)
+    for (var i = 0; i < VALID_DESCRIPTIONS.length; i++) {
+      if (text.indexOf(VALID_DESCRIPTIONS[i]) !== -1) {
+        return VALID_DESCRIPTIONS[i];
+      }
+    }
+
+    return 'detail'; // fallback
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ANGLE DETECTION DISPATCHER — tries Gemini first, falls back to CLIP
+  // ═══════════════════════════════════════════════════════════════════════
+
   async function detectAngle(entry) {
     if (entry.descriptionSource === 'user') return;
+
+    // Try Gemini first if API key is available
+    if (geminiApiKey) {
+      try {
+        if (!fileEntries.find(function (e) { return e.id === entry.id; })) return;
+        var result = await detectAngleGemini(entry);
+        if (!fileEntries.find(function (e) { return e.id === entry.id; })) return;
+        if (entry.descriptionSource === 'user') return;
+
+        entry.description = result;
+        entry.descriptionSource = 'ai';
+        renderList();
+        return;
+      } catch (err) {
+        console.warn('Gemini angle detection failed for', entry.file.name, '— falling back to CLIP:', err);
+      }
+    }
+
+    // Fallback: CLIP zero-shot classification
     try {
       var cls = await getClassifier();
       if (!fileEntries.find(function (e) { return e.id === entry.id; })) return;
@@ -388,13 +516,11 @@
       if (results.length > 0 && results[0].score >= ANGLE_CONFIDENCE_THRESHOLD) {
         entry.description = LABEL_TO_DUTCH[results[0].label] || 'detail';
       } else {
-        // Fallback: use "detail" as catch-all when confidence is too low
         entry.description = 'detail';
       }
       entry.descriptionSource = 'ai';
     } catch (err) {
-      console.warn('Angle detection failed for', entry.file.name, err);
-      // On failure, still fall back to "detail"
+      console.warn('CLIP angle detection failed for', entry.file.name, err);
       if (entry.descriptionSource !== 'user') {
         entry.description = 'detail';
         entry.descriptionSource = 'ai';
@@ -746,6 +872,34 @@
         if (preview) preview.textContent = buildFilename(entry);
       }
     });
+  });
+
+  // ── Settings panel toggle ────────────────────────────────────────────
+  settingsToggle.addEventListener('click', function () {
+    var visible = aiSettingsPanel.style.display !== 'none';
+    aiSettingsPanel.style.display = visible ? 'none' : '';
+    settingsToggle.classList.toggle('active', !visible);
+  });
+
+  // ── Gemini API key input ───────────────────────────────────────────
+  // Initialize UI from stored key
+  if (geminiApiKey) {
+    geminiApiKeyInput.value = geminiApiKey;
+    apiKeyStatus.textContent = 'Saved';
+    apiKeyStatus.className = 'api-key-status saved';
+  }
+
+  geminiApiKeyInput.addEventListener('input', function () {
+    geminiApiKey = geminiApiKeyInput.value.trim();
+    if (geminiApiKey) {
+      localStorage.setItem('tns-gemini-api-key', geminiApiKey);
+      apiKeyStatus.textContent = 'Saved';
+      apiKeyStatus.className = 'api-key-status saved';
+    } else {
+      localStorage.removeItem('tns-gemini-api-key');
+      apiKeyStatus.textContent = '';
+      apiKeyStatus.className = 'api-key-status';
+    }
   });
 
   // ── Drop zone events ─────────────────────────────────────────────────
