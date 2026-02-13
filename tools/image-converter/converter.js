@@ -434,7 +434,6 @@
       '',
       'IMPORTANT:',
       '- The LARGEST visible surface determines camera position. Ignore small protruding features (lenses, knobs, logos).',
-      '- A product photographed from above shows its top housing/panel as the largest area — that is bovenkant/bovenzijde, even if the front edge or lens is partially visible.',
       '',
       'Respond with ONLY the single category name, nothing else.',
     ];
