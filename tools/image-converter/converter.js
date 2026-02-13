@@ -24,6 +24,8 @@
   const toastEl         = document.getElementById('toast');
   const toastIcon       = document.getElementById('toastIcon');
   const toastMsg        = document.getElementById('toastMessage');
+  const productTypeRow  = document.getElementById('productTypeRow');
+  const productTypeSelect = document.getElementById('productTypeSelect');
   const productNameRow  = document.getElementById('productNameRow');
   const productNameInput = document.getElementById('productNameInput');
   const aiModelStatusEl = document.getElementById('aiModelStatus');
@@ -45,6 +47,7 @@
   let fileEntries = []; // { id, file, removeBg, status, objectUrl, resultUrl, resultBlob, description, descriptionSource }
   let nextId = 0;
   let productName = '';          // batch-level product name for all files
+  let productType = '';          // product type for AI angle detection context
   let segmenter = null;          // lazy-loaded Transformers.js RMBG pipeline
   let modelLoading = false;      // prevent concurrent init
   let classifier = null;         // lazy-loaded CLIP pipeline for angle detection
@@ -391,47 +394,52 @@
     'onderkant', 'onderzijde', 'detail', 'afstandsbediening', 'scenario',
   ];
 
-  var GEMINI_PROMPT = [
-    'You are classifying product photography for an e-commerce catalog.',
-    '',
-    'Follow these steps internally before answering:',
-    '',
-    'STEP 1 — Is this a special category?',
-    '  - Is the main subject a handheld remote control (small device with buttons, NOT the main product)? → afstandsbediening',
-    '  - Is the product shown installed/in-use in a real room or environment? → scenario',
-    '  - Is this an extreme close-up of one small feature (a single port, button, label, vent)? → detail',
-    '  - If none of the above, continue to step 2.',
-    '',
-    'STEP 2 — Where is the CAMERA physically positioned?',
-    '  Imagine you are the photographer. Where are you standing/holding the camera relative to the product?',
-    '  - ABOVE the product, looking DOWN at it → the top surface (housing, vents, top panel) dominates',
-    '  - IN FRONT of the product → the front surface (display, lens, front panel) dominates',
-    '  - BEHIND the product → the rear surface (ports, connectors, back panel) dominates',
-    '  - TO THE SIDE of the product → the side surface dominates',
-    '  - BELOW the product, looking UP → the bottom surface (feet, base, screws) dominates',
-    '',
-    'STEP 3 — Is the view straight-on or angled?',
-    '  - If ONLY ONE surface is visible (flat, no perspective/depth) → straight-on ("-kant")',
-    '  - If ONE surface is DOMINANT but you can also see a second surface → angled ("-aanzicht" or "-zijde")',
-    '',
-    'MAPPING:',
-    '  Camera above + straight-on → bovenkant',
-    '  Camera above + angled → bovenzijde',
-    '  Camera in front + straight-on → voorkant',
-    '  Camera in front + angled → vooraanzicht',
-    '  Camera to side + straight-on → zijkant',
-    '  Camera to side + angled → zijaanzicht',
-    '  Camera behind + straight-on → achterkant',
-    '  Camera behind + angled → achterzijde',
-    '  Camera below + straight-on → onderkant',
-    '  Camera below + angled → onderzijde',
-    '',
-    'IMPORTANT:',
-    '- The LARGEST visible surface determines camera position. Ignore small protruding features (lenses, knobs, logos).',
-    '- A product photographed from above shows its top housing/panel as the largest area — that is bovenkant/bovenzijde, even if the front edge or lens is partially visible.',
-    '',
-    'Respond with ONLY the single category name, nothing else.',
-  ].join('\n');
+  function buildGeminiPrompt() {
+    var lines = [
+      'You are classifying product photography for an e-commerce catalog.',
+      'The product in this image is a ' + productType.toUpperCase() + '.',
+      'Use your knowledge of what a ' + productType + ' looks like to correctly identify its top, front, side, back, and bottom surfaces.',
+      '',
+      'Follow these steps internally before answering:',
+      '',
+      'STEP 1 — Is this a special category?',
+      '  - Is the main subject a handheld remote control (small device with buttons, NOT the main product)? → afstandsbediening',
+      '  - Is the product shown installed/in-use in a real room or environment? → scenario',
+      '  - Is this an extreme close-up of one small feature (a single port, button, label, vent)? → detail',
+      '  - If none of the above, continue to step 2.',
+      '',
+      'STEP 2 — Where is the CAMERA physically positioned?',
+      '  Imagine you are the photographer. Where are you standing/holding the camera relative to the ' + productType + '?',
+      '  - ABOVE the product, looking DOWN at it → the top surface dominates',
+      '  - IN FRONT of the product → the front surface dominates',
+      '  - BEHIND the product → the rear surface (ports, connectors, back panel) dominates',
+      '  - TO THE SIDE of the product → the side surface dominates',
+      '  - BELOW the product, looking UP → the bottom surface (feet, base, screws) dominates',
+      '',
+      'STEP 3 — Is the view straight-on or angled?',
+      '  - If ONLY ONE surface is visible (flat, no perspective/depth) → straight-on ("-kant")',
+      '  - If ONE surface is DOMINANT but you can also see a second surface → angled ("-aanzicht" or "-zijde")',
+      '',
+      'MAPPING:',
+      '  Camera above + straight-on → bovenkant',
+      '  Camera above + angled → bovenzijde',
+      '  Camera in front + straight-on → voorkant',
+      '  Camera in front + angled → vooraanzicht',
+      '  Camera to side + straight-on → zijkant',
+      '  Camera to side + angled → zijaanzicht',
+      '  Camera behind + straight-on → achterkant',
+      '  Camera behind + angled → achterzijde',
+      '  Camera below + straight-on → onderkant',
+      '  Camera below + angled → onderzijde',
+      '',
+      'IMPORTANT:',
+      '- The LARGEST visible surface determines camera position. Ignore small protruding features (lenses, knobs, logos).',
+      '- A product photographed from above shows its top housing/panel as the largest area — that is bovenkant/bovenzijde, even if the front edge or lens is partially visible.',
+      '',
+      'Respond with ONLY the single category name, nothing else.',
+    ];
+    return lines.join('\n');
+  }
 
   function fileToBase64(file) {
     return new Promise(function (resolve, reject) {
@@ -457,7 +465,7 @@
         body: JSON.stringify({
           contents: [{
             parts: [
-              { text: GEMINI_PROMPT },
+              { text: buildGeminiPrompt() },
               { inline_data: { mime_type: mimeType, data: base64 } },
             ],
           }],
@@ -696,9 +704,11 @@
       });
     }
 
-    // Auto-detect product angles via AI
-    for (const entry of newEntries) {
-      detectAngle(entry);
+    // Auto-detect product angles via AI (only if product type is selected)
+    if (productType) {
+      for (const entry of newEntries) {
+        detectAngle(entry);
+      }
     }
   }
 
@@ -720,7 +730,9 @@
     });
     fileEntries = [];
     productName = '';
+    productType = '';
     productNameInput.value = '';
+    productTypeSelect.value = '';
     renderList();
   }
 
@@ -730,6 +742,7 @@
     fileListSection.style.display = hasFiles ? '' : 'none';
     convertBar.style.display     = hasFiles ? '' : 'none';
     dropZone.style.display       = hasFiles ? 'none' : '';
+    productTypeRow.style.display = hasFiles ? '' : 'none';
     productNameRow.style.display = hasFiles ? '' : 'none';
 
     fileCountEl.textContent =
@@ -790,7 +803,7 @@
               '<input type="text" class="description-input" ' +
                 'data-action="editDescription" data-id="' + entry.id + '" ' +
                 'value="' + escapeAttr(entry.description) + '" ' +
-                'placeholder="' + (entry.descriptionSource === 'none' && entry.description === '' ? 'Detecting angle\u2026' : 'Add description\u2026') + '"' +
+                'placeholder="' + (entry.descriptionSource === 'none' && entry.description === '' ? (!productType ? 'Select product type\u2026' : 'Detecting angle\u2026') : 'Add description\u2026') + '"' +
                 (entry.status === 'processing' ? ' disabled' : '') + '>' +
               (entry.descriptionSource === 'ai'
                 ? '<span class="description-ai-badge" title="AI-generated">AI</span>'
@@ -890,6 +903,25 @@
       var badge = fileItem.querySelector('.description-ai-badge');
       if (badge) badge.remove();
     }
+  });
+
+  // ── Product type select ──────────────────────────────────────────
+  productTypeSelect.addEventListener('change', function () {
+    var previousType = productType;
+    productType = productTypeSelect.value;
+
+    // When product type is selected (or changed), run angle detection
+    // for all entries that haven't been manually edited
+    if (productType && productType !== previousType) {
+      fileEntries.forEach(function (entry) {
+        if (entry.descriptionSource !== 'user') {
+          entry.description = '';
+          entry.descriptionSource = 'none';
+          detectAngle(entry);
+        }
+      });
+    }
+    renderList();
   });
 
   // ── Product name input ────────────────────────────────────────────
